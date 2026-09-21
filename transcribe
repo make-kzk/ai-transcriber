@@ -32,4 +32,15 @@ fi
 FILE="$1"
 shift
 
+# Modal хранит логи прогонов сутки — сохраняем вывод у себя, иначе
+# разбирать вчерашнее падение будет не по чему. tee, а не перенаправление:
+# вывод должен остаться видимым в терминале.
+LOG_DIR="$HOME/ai-transcriber-logs"
+mkdir -p "$LOG_DIR"
+BASENAME="$(basename "${FILE%.*}")"
+LOG_FILE="$LOG_DIR/${BASENAME}_$(date +%Y-%m-%d_%H%M%S).log"
+exec > >(tee "$LOG_FILE") 2>&1
+echo "Журнал прогона: $LOG_FILE"
+echo
+
 exec "$MODAL_BIN" run "$SCRIPT_PATH" --file "$FILE" "$@"

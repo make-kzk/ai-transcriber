@@ -32,6 +32,10 @@ MODAL_BIN = find_modal_bin()
 # Окно само работает в этом интерпретаторе — им же запускаем вспомогательные скрипты.
 VENV_PYTHON = sys.executable
 
+# Modal хранит логи прогонов всего сутки, поэтому складываем вывод к себе:
+# разбирать упавший прогон назавтра иначе будет не по чему.
+LOG_DIR = HOME / "ai-transcriber-logs"
+
 def find_script_path():
     repo_script = Path(__file__).resolve().parent / "transcribe_modal.py"
     if repo_script.exists():
@@ -309,8 +313,11 @@ class TranscribeApp:
                 verify_cmd += ["--speakers", spk_val]
 
 
+        log_path = LOG_DIR / f"{self.selected_file.stem}_{stamp}.log"
+
         try:
-            launcher = self._write_terminal_script(cmd, verify_cmd)
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            launcher = self._write_terminal_script(cmd, verify_cmd, log_path)
             subprocess.run(["open", "-a", "Terminal", str(launcher)], check=True)
         except Exception as e:
             self.lbl_status.config(text="❌ Не удалось открыть Терминал", foreground="#FF3B30")
@@ -326,13 +333,14 @@ class TranscribeApp:
             self._log_msg("Сверка с ElevenLabs включена — запустится после распознавания.")
         self._log_msg("Ход работы смотрите в открывшемся окне Терминала.")
         self._log_msg(f"Результат: {result.name}")
+        self._log_msg(f"Журнал прогона: {log_path}")
         self._log_msg("=" * 50)
 
         # Результат появится, когда отработает Терминал; кнопки проверяют наличие файла.
         self.btn_open_file.config(state="normal")
         self.btn_open_dir.config(state="normal")
 
-    def _write_terminal_script(self, cmd, verify_cmd=None):
+    def _write_terminal_script(self, cmd, verify_cmd=None, log_path=None):
         """Готовит .command-файл — так Терминал открывается без доступа к автоматизации."""
         quoted = " ".join(shlex.quote(part) for part in cmd)
 
@@ -342,6 +350,14 @@ class TranscribeApp:
             # приходится подключать вручную — иначе не видно ELEVENLABS_API_KEY.
             '[ -f "$HOME/.bash_profile" ] && . "$HOME/.bash_profile"',
             '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"',
+        ]
+
+        if log_path:
+            # tee, а не перенаправление: вывод должен и сохраниться, и остаться
+            # видимым в Терминале — ради него мы от встроенного журнала и ушли.
+            lines.append(f"exec > >(tee {shlex.quote(str(log_path))}) 2>&1")
+
+        lines += [
             'echo ' + shlex.quote(f'Файл: {self.selected_file.name}'),
             "echo",
             quoted,
