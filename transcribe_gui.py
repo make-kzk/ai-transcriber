@@ -1,9 +1,11 @@
 import os
+import sys
 import shlex
 import shutil
 import tempfile
 import subprocess
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -26,6 +28,9 @@ def find_modal_bin():
     return "modal"
 
 MODAL_BIN = find_modal_bin()
+
+# Окно само работает в этом интерпретаторе — им же запускаем вспомогательные скрипты.
+VENV_PYTHON = sys.executable
 
 def find_script_path():
     repo_script = Path(__file__).resolve().parent / "transcribe_modal.py"
@@ -60,6 +65,7 @@ class TranscribeApp:
         style.configure("Card.TFrame", background="#FFFFFF", relief="flat")
         style.configure("TLabel", background="#F5F5F7", font=("SF Pro Text", 12))
         style.configure("Card.TLabel", background="#FFFFFF", font=("SF Pro Text", 12))
+        style.configure("Card.TCheckbutton", background="#FFFFFF", font=("SF Pro Text", 12))
         style.configure("Header.TLabel", background="#F5F5F7", font=("SF Pro Display", 18, "bold"), foreground="#1D1D1F")
         style.configure("SubHeader.TLabel", background="#F5F5F7", font=("SF Pro Text", 11), foreground="#86868B")
         style.configure("Status.TLabel", background="#FFFFFF", font=("SF Pro Text", 12, "bold"), foreground="#0071E3")
@@ -122,13 +128,23 @@ class TranscribeApp:
         )
         self.model_combo.grid(row=1, column=1, sticky="w", padx=(0, 25), pady=3)
 
+        self.verify_var = tk.BooleanVar(value=False)
+        self.chk_verify = ttk.Checkbutton(
+            opts_grid,
+            text="Сверить с ElevenLabs",
+            variable=self.verify_var,
+            style="Card.TCheckbutton",
+        )
+        self.chk_verify.grid(row=1, column=2, columnspan=2, sticky="w", pady=3)
+
         ttk.Label(
             opts_grid,
-            text="результаты не затирают друг друга — модель и время в имени файла",
+            text="Сверка — независимая система распознавания: помечает места,\n"
+                 "где две модели разошлись по смыслу. Нужен ключ ElevenLabs.",
             style="Card.TLabel",
             foreground="#86868B",
             font=("SF Pro Text", 10),
-        ).grid(row=1, column=2, columnspan=2, sticky="w", pady=3)
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         # 4. Панель кнопок: СТАРТ и ОТМЕНА
         btn_box = ttk.Frame(main_container)
@@ -272,14 +288,29 @@ class TranscribeApp:
 
         model_code = self.model_var.get().split()[0]
 
+        # Имя задаём сами: следующим шагам цепочки нужен известный путь,
+        # а иначе его придумывает transcribe_modal.py уже внутри прогона.
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        result = self.selected_file.with_name(
+            f"{self.selected_file.stem}_транскрибация_{model_code}_{stamp}.txt")
+
         cmd = [MODAL_BIN, "run", SCRIPT_PATH,
                "--file", str(self.selected_file),
                "--language", lang_code,
-               "--model", model_code] + speakers_arg
+               "--model", model_code,
+               "--output", str(result)] + speakers_arg
+
+        verify_cmd = None
+        if self.verify_var.get():
+            el_script = str(Path(SCRIPT_PATH).resolve().parent / "transcribe_elevenlabs.py")
+            verify_cmd = [VENV_PYTHON, el_script, str(self.selected_file),
+                          "--reference", str(result), "--compare"]
+            if spk_val.isdigit():
+                verify_cmd += ["--speakers", spk_val]
 
 
         try:
-            launcher = self._write_terminal_script(cmd)
+            launcher = self._write_terminal_script(cmd, verify_cmd)
             subprocess.run(["open", "-a", "Terminal", str(launcher)], check=True)
         except Exception as e:
             self.lbl_status.config(text="❌ Не удалось открыть Терминал", foreground="#FF3B30")
@@ -291,28 +322,57 @@ class TranscribeApp:
         self._log_msg("\n" + "=" * 50)
         self._log_msg(f"Запущено в Терминале: {self.selected_file.name}")
         self._log_msg(f"Параметры: Язык = {lang_code}, Спикеры = {spk_val}, Модель = {model_code}")
+        if verify_cmd:
+            self._log_msg("Сверка с ElevenLabs включена — запустится после распознавания.")
         self._log_msg("Ход работы смотрите в открывшемся окне Терминала.")
-        self._log_msg("Результат ляжет рядом с аудио, с датой и временем в имени.")
+        self._log_msg(f"Результат: {result.name}")
         self._log_msg("=" * 50)
 
         # Результат появится, когда отработает Терминал; кнопки проверяют наличие файла.
         self.btn_open_file.config(state="normal")
         self.btn_open_dir.config(state="normal")
 
-    def _write_terminal_script(self, cmd):
+    def _write_terminal_script(self, cmd, verify_cmd=None):
         """Готовит .command-файл — так Терминал открывается без доступа к автоматизации."""
         quoted = " ".join(shlex.quote(part) for part in cmd)
-        script = (
-            "#!/bin/bash\n"
-            f"echo 'Файл: {shlex.quote(self.selected_file.name)}'\n"
-            "echo\n"
-            f"{quoted}\n"
-            "status=$?\n"
-            "echo\n"
-            "if [ $status -eq 0 ]; then echo '✅ Готово.'; else echo \"❌ Завершилось с кодом $status\"; fi\n"
-            "echo 'Окно можно закрыть.'\n"
-            "rm -f -- \"$0\"\n"
-        )
+
+        lines = [
+            "#!/bin/bash",
+            # Терминал запускает .command не как login-оболочку, поэтому профиль
+            # приходится подключать вручную — иначе не видно ELEVENLABS_API_KEY.
+            '[ -f "$HOME/.bash_profile" ] && . "$HOME/.bash_profile"',
+            '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"',
+            'echo ' + shlex.quote(f'Файл: {self.selected_file.name}'),
+            "echo",
+            quoted,
+            "status=$?",
+            "echo",
+        ]
+
+        if verify_cmd:
+            verify_quoted = " ".join(shlex.quote(part) for part in verify_cmd)
+            lines += [
+                "if [ $status -eq 0 ]; then",
+                '  if [ -z "$ELEVENLABS_API_KEY" ]; then',
+                "    echo '⚠️  Сверка пропущена: не задан ELEVENLABS_API_KEY.'",
+                "    echo '    Добавьте ключ в ~/.bash_profile и откройте окно заново.'",
+                "  else",
+                "    echo '--- Сверка с независимой системой (ElevenLabs) ---'",
+                f"    {verify_quoted}",
+                "    status=$?",
+                "  fi",
+                "fi",
+                "echo",
+            ]
+
+        lines += [
+            "if [ $status -eq 0 ]; then echo '✅ Готово.'; "
+            'else echo "❌ Завершилось с кодом $status"; fi',
+            "echo 'Окно можно закрыть.'",
+            'rm -f -- "$0"',
+        ]
+
+        script = "\n".join(lines) + "\n"
         # Уникальное имя: при параллельных запусках общий файл успевал
         # перезаписаться до того, как Терминал его прочитает, и оба окна
         # уходили транскрибировать одно и то же.
