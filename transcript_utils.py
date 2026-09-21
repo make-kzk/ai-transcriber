@@ -76,13 +76,23 @@ def fitted_transcript(words, reference) -> str:
     система режет речь по-своему. Раскладываем слова по временным окнам
     эталона — тогда сравнивается речь из одних и тех же отрезков записи.
     """
-    buckets = [[] for _ in reference]
+    buckets, orphans = [[] for _ in reference], 0
     for w in words:
         mid = (w["start"] + w["end"]) / 2
         for i, seg in enumerate(reference):
             if seg["start"] <= mid <= seg["end"] + 1:
                 buckets[i].append(w["text"])
                 break
+        else:
+            # Слово прозвучало там, где у эталона реплики нет. Сверка его не
+            # увидит: так теряются места, где вторая система услышала то,
+            # чего эталон не заметил вовсе.
+            orphans += 1
+
+    if orphans:
+        share = orphans / len(words) * 100
+        note = "" if share < 1 else "  ⚠️ эталон мог пропустить эти фрагменты"
+        print(f"   вне реплик эталона осталось слов: {orphans} ({share:.1f}%){note}")
 
     out = []
     for seg, bucket in zip(reference, buckets):
