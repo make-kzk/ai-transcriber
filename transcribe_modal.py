@@ -17,15 +17,27 @@ image = (
         index_url="https://download.pytorch.org/whl/cu121",
     )
     .pip_install(
-        "whisperx==3.3.1",
+        "whisperx==3.3.2",
         "pyannote.audio==3.3.2",
         "transformers==4.48.3",
-        "ctranslate2==4.4.0",
+        # ctranslate2 4.5.0 — первая версия под cuDNN 9, как в torch 2.5.1 (cudnn 9.1.0.70);
+        # whisperx 3.3.2 — единственный релиз 3.x, требующий ctranslate2>=4.5.0
+        "ctranslate2==4.5.0",
+        # matplotlib — необъявленная зависимость pyannote.audio 3.3.2:
+        # импортируется на верхнем уровне в tasks/segmentation/mixins.py
+        "matplotlib==3.11.2",
     )
     .env({
-        "HF_HOME": "/root/.cache/huggingface",
-        "TORCH_HOME": "/root/.cache/torch",
-        "NLTK_DATA": "/root/.cache/nltk_data",
+        "HF_HOME": "/cache/huggingface",
+        "TORCH_HOME": "/cache/torch",
+        "NLTK_DATA": "/cache/nltk_data",
+        # CTranslate2 грузит cuDNN через динамический линковщик, а torch — по абсолютным
+        # путям, поэтому библиотеки из site-packages/nvidia надо явно добавить в поиск.
+        # Только через .env(): LD_LIBRARY_PATH читается при старте процесса.
+        "LD_LIBRARY_PATH": (
+            "/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:"
+            "/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib"
+        ),
     })
 )
 
@@ -34,9 +46,9 @@ app = modal.App("whisperx-transcriber")
 @app.function(
     image=image,
     gpu="A10G",  # Высокопроизводительная серверная видеокарта Nvidia A10G (24 GB)
-    timeout=900,
+    timeout=1800,  # первый прогон включает скачивание моделей в пустой том
     secrets=[modal.Secret.from_name("huggingface-secret")],
-    volumes={"/root/.cache": model_volume},
+    volumes={"/cache": model_volume},
 )
 def process_audio(
     audio_bytes: bytes,
@@ -72,7 +84,7 @@ def process_audio(
             device=device,
             compute_type=compute_type,
             language=language if language != "auto" else None,
-            download_root="/root/.cache/torch/whisperx",
+            download_root="/cache/whisperx",
         )
         result = whisper_model.transcribe(audio, batch_size=16)
         detected_lang = result.get("language", language)
@@ -121,6 +133,18 @@ def process_audio(
             diarize_segments = diarize_model(audio, min_speakers=min_spk, max_speakers=max_spk)
             result = whisperx.assign_word_speakers(diarize_segments, result)
         except Exception as diarize_err:
+            err_msg = str(diarize_err)
+            if "403" in err_msg or "Gated" in err_msg or "gated" in err_msg or "401" in err_msg:
+                raise RuntimeError(
+                    "❌ Нет доступа к моделям Pyannote на Hugging Face.\n"
+                    "Откройте обе страницы под аккаунтом, чей токен лежит в секрете huggingface-secret,\n"
+                    "и нажмите «Agree and access repository»:\n"
+                    "  https://huggingface.co/pyannote/speaker-diarization-3.1\n"
+                    "  https://huggingface.co/pyannote/segmentation-3.0\n"
+                    "Если доступ уже выдан — проверьте, что HF_TOKEN в секрете read-токен "
+                    "с разрешением на публичные gated-репозитории.\n"
+                    f"Исходная ошибка: {diarize_err}"
+                ) from diarize_err
             raise RuntimeError(f"❌ Ошибка на шаге диаризации (Pyannote): {diarize_err}") from diarize_err
 
         # Фиксация кеша в persistent volume

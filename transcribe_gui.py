@@ -4,6 +4,7 @@ import time
 import shutil
 import subprocess
 import threading
+import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -51,6 +52,7 @@ class TranscribeApp:
         self.start_time = None
         self.timer_id = None
         self.current_process = None
+        self.was_cancelled = False
 
         self._setup_style()
         self._build_ui()
