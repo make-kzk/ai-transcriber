@@ -86,13 +86,13 @@ def process_audio(
         try:
             diarize_model = DiarizationPipeline(
                 model_name="pyannote/speaker-diarization-3.1",
-                use_auth_token=hf_token,
+                token=hf_token,
                 device=device,
             )
         except TypeError:
             diarize_model = DiarizationPipeline(
                 model_name="pyannote/speaker-diarization-3.1",
-                token=hf_token,
+                use_auth_token=hf_token,
                 device=device,
             )
         
