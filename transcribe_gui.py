@@ -1,13 +1,27 @@
 import os
 import sys
+import re
+import pty
 import time
+import fcntl
+import codecs
+import struct
 import shutil
+import termios
 import subprocess
 import threading
 import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+# Управляющие последовательности, которыми rich рисует живой вывод modal:
+# CSI (цвета, перемещение курсора), OSC (заголовок окна) и одиночные Esc-коды.
+ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+)
 
 # Автоматическое динамическое определение путей
 HOME = Path.home()
@@ -53,6 +67,8 @@ class TranscribeApp:
         self.timer_id = None
         self.current_process = None
         self.was_cancelled = False
+        self.heartbeat_id = None
+        self.last_output_ts = None
 
         self._setup_style()
         self._build_ui()
@@ -239,6 +255,28 @@ class TranscribeApp:
             self.lbl_status.config(text="Готов к запуску", foreground="#1D1D1F")
             self._log_msg(f"Выбран файл: {self.selected_file.name}")
 
+    def _on_proc_line(self, text):
+        """Строка пришла от процесса — сбрасываем таймер тишины."""
+        self.last_output_ts = time.time()
+        self._log_msg(text)
+
+    def _heartbeat(self):
+        """Показывает, что работа идёт, даже когда modal молчит.
+
+        Вывод дочернего процесса буферизуется и может не доходить до окна
+        минутами; без этого журнал выглядит застывшим и неотличим от зависания.
+        """
+        if not self.is_running:
+            return
+        quiet_for = time.time() - (self.last_output_ts or self.start_time or time.time())
+        if quiet_for >= 15:
+            elapsed = int(time.time() - self.start_time) if self.start_time else 0
+            m, s = divmod(elapsed, 60)
+            stage = self.lbl_status.cget("text")
+            self._log_msg(f"... {m:02d}:{s:02d} — работа идёт ({stage}); "
+                          f"новых сообщений нет {int(quiet_for)} с")
+        self.heartbeat_id = self.root.after(15000, self._heartbeat)
+
     def _log_msg(self, text):
         self.log_text.config(state="normal")
         self.log_text.insert("end", text + "\n")
@@ -307,6 +345,9 @@ class TranscribeApp:
         self._log_msg(f"Параметры: Язык = {lang_code}, Спикеры = {spk_val}")
         self._log_msg("="*50 + "\n")
 
+        self.last_output_ts = time.time()
+        self._heartbeat()
+
         thread = threading.Thread(target=self._run_process, args=(cmd,), daemon=True)
         thread.start()
 
@@ -328,50 +369,85 @@ class TranscribeApp:
                 pass
 
     def _run_process(self, cmd):
+        """Запускает modal в псевдотерминале.
+
+        Через обычный pipe modal видит !isatty() и переключается в тихий
+        режим — в журнал не попадает почти ничего. С pty он выдаёт тот же
+        живой вывод, что и в терминале, а ANSI-последовательности мы
+        вычищаем сами.
+        """
+        master_fd = None
         try:
             env = dict(os.environ)
             env["PYTHONUNBUFFERED"] = "1"
+            env["TERM"] = "xterm-256color"
+            env["COLUMNS"] = "200"
+
+            master_fd, slave_fd = pty.openpty()
+            try:
+                # Широкое окно, чтобы rich не рвал строки на середине.
+                fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                            struct.pack("HHHH", 50, 200, 0, 0))
+            except Exception:
+                pass
 
             self.current_process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
+                stdin=subprocess.DEVNULL,
+                stdout=slave_fd,
+                stderr=slave_fd,
                 env=env,
+                close_fds=True,
             )
+            os.close(slave_fd)
 
-            # Чтение посимвольно/построчно с поддержкой \r и \n для реального времени
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             buffer = ""
+            last_line = None
+
+            def emit(raw):
+                nonlocal last_line
+                line = ANSI_RE.sub("", raw).strip()
+                # rich перерисовывает одни и те же строки — не дублируем их.
+                if line and line != last_line:
+                    last_line = line
+                    self.root.after(0, self._on_proc_line, line)
+
             while True:
-                char = self.current_process.stdout.read(1)
-                if not char:
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
+                    break  # EIO — дочерний процесс закрыл терминал
+                if not data:
                     break
-                if char in ("\r", "\n"):
-                    clean = buffer.strip()
-                    if clean:
-                        self.root.after(0, self._log_msg, clean)
-                    buffer = ""
-                else:
-                    buffer += char
-            
-            if buffer.strip():
-                self.root.after(0, self._log_msg, buffer.strip())
+                for ch in decoder.decode(data):
+                    if ch in ("\r", "\n"):
+                        emit(buffer)
+                        buffer = ""
+                    else:
+                        buffer += ch
 
-            self.current_process.stdout.close()
+            emit(buffer)
             ret_code = self.current_process.wait()
-
             self.root.after(0, self._on_finished, ret_code)
         except Exception as e:
             self.root.after(0, self._log_msg, f"Ошибка выполнения: {e}")
             self.root.after(0, self._on_finished, 1)
+        finally:
+            if master_fd is not None:
+                try:
+                    os.close(master_fd)
+                except Exception:
+                    pass
 
     def _on_finished(self, ret_code):
         self.is_running = False
         self.progress_bar.stop()
         if self.timer_id:
             self.root.after_cancel(self.timer_id)
+        if self.heartbeat_id:
+            self.root.after_cancel(self.heartbeat_id)
+            self.heartbeat_id = None
 
         self.btn_start.config(text="🚀  Начать транскрибацию", state="normal", bg="#0071E3")
         self.btn_cancel.config(state="disabled")
