@@ -110,6 +110,25 @@ class TranscribeApp:
         self.lang_combo = ttk.Combobox(opts_grid, textvariable=self.lang_var, values=["Русский (ru)", "Английский (en)", "Автоопределение"], width=15, state="readonly")
         self.lang_combo.grid(row=0, column=3, sticky="w", pady=3)
 
+        ttk.Label(opts_grid, text="Модель:", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        self.model_var = tk.StringVar(value="large-v3 (точнее)")
+        self.model_combo = ttk.Combobox(
+            opts_grid,
+            textvariable=self.model_var,
+            values=["large-v3 (точнее)", "large-v2 (прежняя)"],
+            width=15,
+            state="readonly",
+        )
+        self.model_combo.grid(row=1, column=1, sticky="w", padx=(0, 25), pady=3)
+
+        ttk.Label(
+            opts_grid,
+            text="результаты не затирают друг друга — модель и время в имени файла",
+            style="Card.TLabel",
+            foreground="#86868B",
+            font=("SF Pro Text", 10),
+        ).grid(row=1, column=2, columnspan=2, sticky="w", pady=3)
+
         # 4. Панель кнопок: СТАРТ и ОТМЕНА
         btn_box = ttk.Frame(main_container)
         btn_box.pack(fill="x", pady=(0, 12))
@@ -250,9 +269,12 @@ class TranscribeApp:
         else:
             lang_code = "auto"
 
+        model_code = self.model_var.get().split()[0]
+
         cmd = [MODAL_BIN, "run", SCRIPT_PATH,
                "--file", str(self.selected_file),
-               "--language", lang_code] + speakers_arg
+               "--language", lang_code,
+               "--model", model_code] + speakers_arg
 
 
         try:
@@ -267,7 +289,7 @@ class TranscribeApp:
         self.lbl_status.config(text="▶️ Запущено в Терминале", foreground="#34C759")
         self._log_msg("\n" + "=" * 50)
         self._log_msg(f"Запущено в Терминале: {self.selected_file.name}")
-        self._log_msg(f"Параметры: Язык = {lang_code}, Спикеры = {spk_val}")
+        self._log_msg(f"Параметры: Язык = {lang_code}, Спикеры = {spk_val}, Модель = {model_code}")
         self._log_msg("Ход работы смотрите в открывшемся окне Терминала.")
         self._log_msg("Результат ляжет рядом с аудио, с датой и временем в имени.")
         self._log_msg("=" * 50)
