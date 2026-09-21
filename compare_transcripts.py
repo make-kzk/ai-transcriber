@@ -18,13 +18,19 @@ from pathlib import Path
 SEG_RE = re.compile(r"^\[(\d\d):(\d\d) - (\d\d):(\d\d)\] (SPEAKER_\d+):$")
 
 # Потеря или появление этих слов переворачивает смысл фразы.
-NEGATION = {"не", "нет", "ни", "нельзя", "без", "никогда", "никто", "ничего"}
+NEGATION = {"не", "нет", "ни", "нельзя", "без"}
+# Отрицательные местоимения склоняются: никакой, никакого, никем, ничему.
+NEGATION_RE = re.compile(r"^(ника\w*|никог\w*|никт\w*|ником\w*|никем|нич\w*|нискол\w*)$")
+
+
+def has_negation(words) -> bool:
+    return any(w in NEGATION or NEGATION_RE.match(w) for w in words)
 
 # Разговорные варианты одного слова — расхождением не считаются.
 SAME_WORD = {"нету": "нет", "нема": "нет", "ага": "да", "угу": "да"}
 
 # Обороты, где «не» — часть слова-паразита, а не отрицание по смыслу.
-FILLER_PHRASES = {("не", "знаю"), ("не", "знаю", "там"), ("то", "есть")}
+FILLER_PHRASES = (("не", "знаю"), ("то", "есть"))
 
 # Вставка или пропуск слова-паразита смысла не меняет.
 FILLER = {
@@ -64,16 +70,41 @@ def as_number(tokens) -> int | None:
     return total if seen else None
 
 
-def classify(left, right):
+def drop_filler_phrases(words):
+    """Убирает «не знаю» и подобное — там «не» не отрицание, а часть оборота."""
+    out, i = [], 0
+    while i < len(words):
+        for phrase in FILLER_PHRASES:
+            if tuple(words[i:i + len(phrase)]) == phrase:
+                i += len(phrase)
+                break
+        else:
+            out.append(words[i])
+            i += 1
+    return out
+
+
+def split_tokens(raw_tokens):
+    """«3-5,» -> ['3', '5']: иначе диапазон не сравнить с «три, пять»."""
+    out = []
+    for t in raw_tokens:
+        out.extend(w for w in re.split(r"[^0-9a-zа-яё]+", t.lower().replace("ё", "е")) if w)
+    return [SAME_WORD.get(w, w) for w in out]
+
+
+def classify(left_raw, right_raw):
     """Насколько расхождение важно: critical / content / noise."""
-    # «не знаю» — оборот-паразит; его «не» отрицанием не считаем.
-    strip = lambda ws: [] if tuple(ws) in FILLER_PHRASES else ws
-    left, right = strip(left), strip(right)
+    left = drop_filler_phrases(split_tokens(left_raw))
+    right = drop_filler_phrases(split_tokens(right_raw))
     ls, rs = set(left), set(right)
 
     if not left and not right:
         return "noise"
-    if (ls & NEGATION) != (rs & NEGATION):
+
+    # Критично, когда отрицание есть с одной стороны и пропало с другой.
+    # Если оно есть в обеих — это перестройка фразы, смысл сохранён:
+    # «никакой замене» и «ни о какой замене» значат одно и то же.
+    if has_negation(left) != has_negation(right):
         return "critical"
 
     ln, rn = as_number(left), as_number(right)
@@ -107,11 +138,24 @@ def parse(path: Path):
     return segments
 
 
+def moved_to_neighbour(words, segments, index) -> bool:
+    """Текст не пропал, а уехал в соседнюю реплику — границы режутся по-разному."""
+    # Короткий фрагмент соседом не объяснить: одиночное «не» есть в любой
+    # реплике рядом, и такое правило съело бы ровно то, что мы ищем.
+    if len(words) < 3:
+        return False
+    near = set()
+    for j in (index - 1, index + 1):
+        if 0 <= j < len(segments):
+            near.update(norm(t) for t in segments[j]["text"].split())
+    return sum(1 for w in words if w in near) >= max(1, len(words) * 0.6)
+
+
 def compare(base_segs, other_segs, show_noise=False):
     """Возвращает текст сведённой расшифровки и список находок."""
     findings, body = [], []
 
-    for base, other in zip(base_segs, other_segs):
+    for index, (base, other) in enumerate(zip(base_segs, other_segs)):
         bt, ot = base["text"].split(), other["text"].split()
         bn, on = [norm(t) for t in bt], [norm(t) for t in ot]
         matcher = difflib.SequenceMatcher(None, bn, on)
@@ -120,7 +164,13 @@ def compare(base_segs, other_segs, show_noise=False):
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == "equal":
                 continue
-            level = classify([w for w in bn[i1:i2] if w], [w for w in on[j1:j2] if w])
+            level = classify(bt[i1:i2], ot[j1:j2])
+            if level == "critical":
+                # Пропажа с одной стороны часто означает лишь другую нарезку реплик.
+                if not bn[i1:i2] and moved_to_neighbour(on[j1:j2], base_segs, index):
+                    level = "noise"
+                elif not on[j1:j2] and moved_to_neighbour(bn[i1:i2], other_segs, index):
+                    level = "noise"
             if level == "noise" and not show_noise:
                 continue
             mark = "!!" if level == "critical" else "??"
