@@ -1,27 +1,12 @@
-import os
-import sys
-import re
-import pty
-import time
-import fcntl
-import codecs
-import struct
+import shlex
 import shutil
-import termios
+import tempfile
 import subprocess
-import threading
 import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# Управляющие последовательности, которыми rich рисует живой вывод modal:
-# CSI (цвета, перемещение курсора), OSC (заголовок окна) и одиночные Esc-коды.
-ANSI_RE = re.compile(
-    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
-    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
-    r"|\x1b[@-Z\\-_]"
-)
 
 # Автоматическое динамическое определение путей
 HOME = Path.home()
@@ -62,13 +47,6 @@ class TranscribeApp:
 
         self.selected_file = None
         self.result_file = None
-        self.is_running = False
-        self.start_time = None
-        self.timer_id = None
-        self.current_process = None
-        self.was_cancelled = False
-        self.heartbeat_id = None
-        self.last_output_ts = None
 
         self._setup_style()
         self._build_ui()
@@ -152,24 +130,8 @@ class TranscribeApp:
             command=self.start_transcription,
             state="disabled",
         )
-        self.btn_start.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.btn_start.pack(fill="x", expand=True)
 
-        self.btn_cancel = tk.Button(
-            btn_box,
-            text="🛑 Отмена",
-            font=("SF Pro Text", 13),
-            bg="#FF3B30",
-            fg="#FFFFFF",
-            activebackground="#D32F2F",
-            activeforeground="#FFFFFF",
-            relief="flat",
-            padx=12,
-            pady=8,
-            cursor="pointinghand",
-            command=self.cancel_transcription,
-            state="disabled",
-        )
-        self.btn_cancel.pack(side="right")
 
         # 5. Карточка статуса и прогресса
         status_card = ttk.Frame(main_container, style="Card.TFrame", padding=14)
@@ -181,11 +143,6 @@ class TranscribeApp:
         self.lbl_status = ttk.Label(status_header, text="Ожидание файла", style="Status.TLabel")
         self.lbl_status.pack(side="left")
 
-        self.lbl_timer = ttk.Label(status_header, text="00:00", style="Timer.TLabel")
-        self.lbl_timer.pack(side="right")
-
-        self.progress_bar = ttk.Progressbar(status_card, mode="indeterminate", length=400)
-        self.progress_bar.pack(fill="x", pady=(4, 6))
 
         info_box = ttk.Frame(status_card, style="Card.TFrame")
         info_box.pack(fill="x")
@@ -255,28 +212,6 @@ class TranscribeApp:
             self.lbl_status.config(text="Готов к запуску", foreground="#1D1D1F")
             self._log_msg(f"Выбран файл: {self.selected_file.name}")
 
-    def _on_proc_line(self, text):
-        """Строка пришла от процесса — сбрасываем таймер тишины."""
-        self.last_output_ts = time.time()
-        self._log_msg(text)
-
-    def _heartbeat(self):
-        """Показывает, что работа идёт, даже когда modal молчит.
-
-        Вывод дочернего процесса буферизуется и может не доходить до окна
-        минутами; без этого журнал выглядит застывшим и неотличим от зависания.
-        """
-        if not self.is_running:
-            return
-        quiet_for = time.time() - (self.last_output_ts or self.start_time or time.time())
-        if quiet_for >= 15:
-            elapsed = int(time.time() - self.start_time) if self.start_time else 0
-            m, s = divmod(elapsed, 60)
-            stage = self.lbl_status.cget("text")
-            self._log_msg(f"... {m:02d}:{s:02d} — работа идёт ({stage}); "
-                          f"новых сообщений нет {int(quiet_for)} с")
-        self.heartbeat_id = self.root.after(15000, self._heartbeat)
-
     def _log_msg(self, text):
         self.log_text.config(state="normal")
         self.log_text.insert("end", text + "\n")
@@ -294,33 +229,19 @@ class TranscribeApp:
         elif "initialized" in text_lower or "building" in text_lower or "step" in text_lower:
             self.lbl_status.config(text="⚡️ Инициализация облачного GPU...", foreground="#FF9500")
 
-    def _update_timer(self):
-        if self.is_running and self.start_time:
-            elapsed = int(time.time() - self.start_time)
-            m, s = divmod(elapsed, 60)
-            self.lbl_timer.config(text=f"{m:02d}:{s:02d}")
-            self.timer_id = self.root.after(1000, self._update_timer)
-
     def start_transcription(self):
-        if not self.selected_file or self.is_running:
+        """Запускает транскрибацию в Терминале.
+
+        modal отдаёт вывод пачками, когда пишет не в TTY, поэтому встроенный
+        журнал наполнялся рывками и не показывал ход работы. В настоящем
+        терминале вывод живой без ухищрений — окно берёт на себя только
+        выбор файла и параметров.
+        """
+        if not self.selected_file:
             return
 
-        self.is_running = True
-        self.start_time = time.time()
-        self.progress_bar.start(10)
-        self._update_timer()
-
-        self.btn_start.config(text="⏳  Идет обработка в облаке...", state="disabled", bg="#D2D2D7")
-        self.btn_cancel.config(state="normal")
-        self.btn_select.config(state="disabled")
-        self.btn_open_file.config(state="disabled")
-        self.btn_open_dir.config(state="disabled")
-        self.lbl_status.config(text="🚀 Запуск облачной видеокарты A10G...", foreground="#0071E3")
-
         spk_val = self.spk_var.get()
-        speakers_arg = []
-        if spk_val.isdigit():
-            speakers_arg = ["--speakers", spk_val]
+        speakers_arg = ["--speakers", spk_val] if spk_val.isdigit() else []
 
         lang_val = self.lang_var.get()
         if "ru" in lang_val:
@@ -330,157 +251,51 @@ class TranscribeApp:
         else:
             lang_code = "auto"
 
-        cmd = [
-            MODAL_BIN,
-            "run",
-            SCRIPT_PATH,
-            "--file",
-            str(self.selected_file),
-            "--language",
-            lang_code,
-        ] + speakers_arg
+        cmd = [MODAL_BIN, "run", SCRIPT_PATH,
+               "--file", str(self.selected_file),
+               "--language", lang_code] + speakers_arg
 
-        self._log_msg("\n" + "="*50)
-        self._log_msg(f"🚀 Старт: {self.selected_file.name}")
-        self._log_msg(f"Параметры: Язык = {lang_code}, Спикеры = {spk_val}")
-        self._log_msg("="*50 + "\n")
+        self.result_file = self.selected_file.with_name(
+            f"{self.selected_file.stem}_транскрибация.txt")
 
-        self.last_output_ts = time.time()
-        self._heartbeat()
-
-        thread = threading.Thread(target=self._run_process, args=(cmd,), daemon=True)
-        thread.start()
-
-    def cancel_transcription(self):
-        if self.current_process and self.is_running:
-            self.was_cancelled = True
-            self._log_msg("\n🛑 Отмена процесса пользователем...")
-            try:
-                self.current_process.terminate()
-                self.root.after(2000, self._force_kill_if_needed)
-            except Exception as e:
-                self._log_msg(f"Ошибка при отмене: {e}")
-
-    def _force_kill_if_needed(self):
-        if self.current_process and self.current_process.poll() is None:
-            try:
-                self.current_process.kill()
-            except Exception:
-                pass
-
-    def _run_process(self, cmd):
-        """Запускает modal в псевдотерминале.
-
-        Через обычный pipe modal видит !isatty() и переключается в тихий
-        режим — в журнал не попадает почти ничего. С pty он выдаёт тот же
-        живой вывод, что и в терминале, а ANSI-последовательности мы
-        вычищаем сами.
-        """
-        master_fd = None
         try:
-            env = dict(os.environ)
-            env["PYTHONUNBUFFERED"] = "1"
-            env["TERM"] = "xterm-256color"
-            env["COLUMNS"] = "200"
-
-            master_fd, slave_fd = pty.openpty()
-            try:
-                # Широкое окно, чтобы rich не рвал строки на середине.
-                fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
-                            struct.pack("HHHH", 50, 200, 0, 0))
-            except Exception:
-                pass
-
-            self.current_process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                env=env,
-                close_fds=True,
-            )
-            os.close(slave_fd)
-
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-            buffer = ""
-            last_line = None
-
-            def emit(raw):
-                nonlocal last_line
-                line = ANSI_RE.sub("", raw).strip()
-                # rich перерисовывает одни и те же строки — не дублируем их.
-                if line and line != last_line:
-                    last_line = line
-                    self.root.after(0, self._on_proc_line, line)
-
-            while True:
-                try:
-                    data = os.read(master_fd, 4096)
-                except OSError:
-                    break  # EIO — дочерний процесс закрыл терминал
-                if not data:
-                    break
-                for ch in decoder.decode(data):
-                    if ch in ("\r", "\n"):
-                        emit(buffer)
-                        buffer = ""
-                    else:
-                        buffer += ch
-
-            emit(buffer)
-            ret_code = self.current_process.wait()
-            self.root.after(0, self._on_finished, ret_code)
+            launcher = self._write_terminal_script(cmd)
+            subprocess.run(["open", "-a", "Terminal", str(launcher)], check=True)
         except Exception as e:
-            self.root.after(0, self._log_msg, f"Ошибка выполнения: {e}")
-            self.root.after(0, self._on_finished, 1)
-        finally:
-            if master_fd is not None:
-                try:
-                    os.close(master_fd)
-                except Exception:
-                    pass
-
-    def _on_finished(self, ret_code):
-        self.is_running = False
-        self.progress_bar.stop()
-        if self.timer_id:
-            self.root.after_cancel(self.timer_id)
-        if self.heartbeat_id:
-            self.root.after_cancel(self.heartbeat_id)
-            self.heartbeat_id = None
-
-        self.btn_start.config(text="🚀  Начать транскрибацию", state="normal", bg="#0071E3")
-        self.btn_cancel.config(state="disabled")
-        self.btn_select.config(state="normal")
-        self.current_process = None
-
-        if self.was_cancelled:
-            self.lbl_status.config(text="🛑 Транскрибация отменена", foreground="#FF9500")
-            self._log_msg("🛑 Транскрибация была отменена пользователем.")
-            self.was_cancelled = False
+            self.lbl_status.config(text="❌ Не удалось открыть Терминал", foreground="#FF3B30")
+            self._log_msg(f"Ошибка запуска Терминала: {e}")
+            messagebox.showerror("Ошибка", f"Не удалось открыть Терминал:\n{e}", parent=self.root)
             return
 
-        elapsed = int(time.time() - self.start_time) if self.start_time else 0
-        em, es = divmod(elapsed, 60)
+        self.lbl_status.config(text="▶️ Запущено в Терминале", foreground="#34C759")
+        self._log_msg("\n" + "=" * 50)
+        self._log_msg(f"Запущено в Терминале: {self.selected_file.name}")
+        self._log_msg(f"Параметры: Язык = {lang_code}, Спикеры = {spk_val}")
+        self._log_msg("Ход работы смотрите в открывшемся окне Терминала.")
+        self._log_msg(f"Результат: {self.result_file.name}")
+        self._log_msg("=" * 50)
 
-        if ret_code == 0:
-            self.result_file = self.selected_file.with_name(f"{self.selected_file.stem}_транскрибация.txt")
-            self.lbl_status.config(text=f"✅ Готово! (за {em:02d}:{es:02d})", foreground="#34C759")
-            self.btn_open_file.config(state="normal")
-            self.btn_open_dir.config(state="normal")
+        # Результат появится, когда отработает Терминал; кнопки проверяют наличие файла.
+        self.btn_open_file.config(state="normal")
+        self.btn_open_dir.config(state="normal")
 
-            try:
-                subprocess.run(["afplay", "/System/Library/Sounds/Glass.aiff"], capture_output=True)
-                os.system(f'osascript -e \'display notification "Транскрибация успешно завершена за {em:02d}:{es:02d}!" with title "AI Транскрибатор"\'')
-            except Exception:
-                pass
-            messagebox.showinfo("Готово!", f"Транскрибация завершена успешно за {em:02d}:{es:02d}!\nРезультат сохранен рядом с аудиофайлом:\n{self.result_file.name}", parent=self.root)
-        else:
-            self.lbl_status.config(text="❌ Ошибка выполнения (см. журнал)", foreground="#FF3B30")
-            try:
-                subprocess.run(["afplay", "/System/Library/Sounds/Basso.aiff"], capture_output=True)
-            except Exception:
-                pass
+    def _write_terminal_script(self, cmd):
+        """Готовит .command-файл — так Терминал открывается без доступа к автоматизации."""
+        quoted = " ".join(shlex.quote(part) for part in cmd)
+        script = (
+            "#!/bin/bash\n"
+            f"echo 'Файл: {shlex.quote(self.selected_file.name)}'\n"
+            "echo\n"
+            f"{quoted}\n"
+            "status=$?\n"
+            "echo\n"
+            "if [ $status -eq 0 ]; then echo '✅ Готово.'; else echo \"❌ Завершилось с кодом $status\"; fi\n"
+            "echo 'Окно можно закрыть.'\n"
+        )
+        launcher = Path(tempfile.gettempdir()) / "ai_transcriber_run.command"
+        launcher.write_text(script, encoding="utf-8")
+        launcher.chmod(0o755)
+        return launcher
 
     def open_result_file(self):
         if self.result_file and self.result_file.exists():
@@ -492,36 +307,9 @@ class TranscribeApp:
         elif self.selected_file and self.selected_file.exists():
             subprocess.run(["open", "-R", str(self.selected_file)])
 
-    def on_close(self):
-        """Закрытие окна не должно оставлять работающую задачу в облаке.
-
-        python запускается дочерним процессом, поэтому при закрытии окна он
-        осиротеет и продолжит крутить оплачиваемый GPU до самого конца.
-        """
-        if self.is_running and self.current_process:
-            if not messagebox.askokcancel(
-                "Идёт транскрибация",
-                "Задача ещё выполняется в облаке.\n"
-                "Закрыть окно и остановить её?",
-                parent=self.root,
-            ):
-                return
-            self.was_cancelled = True
-            try:
-                self.current_process.terminate()
-                self.current_process.wait(timeout=5)
-            except Exception:
-                try:
-                    self.current_process.kill()
-                except Exception:
-                    pass
-        self.root.destroy()
-
-
 def main():
     root = tk.Tk()
     app = TranscribeApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
 
 if __name__ == "__main__":
