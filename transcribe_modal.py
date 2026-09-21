@@ -58,11 +58,19 @@ def process_audio(
     min_speakers: int = None,
     max_speakers: int = None,
 ):
+    import time
     import inspect
     import tempfile
     import torch
     import whisperx
     from whisperx.diarize import DiarizationPipeline
+
+    timings = {}
+    t_run = time.time()
+
+    def mark(stage, since):
+        """Замер длительности этапа — чтобы оптимизировать по факту, а не на глаз."""
+        timings[stage] = time.time() - since
 
     hf_token = os.environ.get("HF_TOKEN")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -75,23 +83,30 @@ def process_audio(
             temp_file.write(audio_bytes)
             temp_audio_path = temp_file.name
 
-        print(f"--> [1/3] Загрузка и распознавание аудио ({filename}) с моделью large-v2...")
+        print(f"--> [1/3] Загрузка и распознавание аудио ({filename}) с моделью large-v3...")
         audio = whisperx.load_audio(temp_audio_path)
         
         # 1. Распознавание речи
+        t_load = time.time()
         whisper_model = whisperx.load_model(
-            "large-v2",
+            "large-v3",
             device=device,
             compute_type=compute_type,
             language=language if language != "auto" else None,
             download_root="/cache/whisperx",
         )
-        result = whisper_model.transcribe(audio, batch_size=16)
+        mark("Загрузка модели", t_load)
+
+        t_asr = time.time()
+        # A10G — 24 ГБ, large-v3 в fp16 занимает около 5 ГБ: запас по батчу большой.
+        result = whisper_model.transcribe(audio, batch_size=24)
+        mark("Распознавание", t_asr)
         detected_lang = result.get("language", language)
         print(f"--> Язык распознан: {detected_lang}")
 
         # 2. Выравнивание таймкодов (word alignment)
         print("--> [2/3] Выравнивание таймкодов (forced alignment)...")
+        t_align = time.time()
         try:
             align_model, align_metadata = whisperx.load_align_model(
                 language_code=detected_lang,
@@ -107,9 +122,11 @@ def process_audio(
             )
         except Exception as align_err:
             print(f"Внимание: Выравнивание пропущено ({align_err}), используем базовые сегменты.")
+        mark("Выравнивание", t_align)
 
         # 3. Диаризация (определение спикеров)
         print("--> [3/3] Определение спикеров нейросетью Pyannote...")
+        t_diar = time.time()
         try:
             sig = inspect.signature(DiarizationPipeline.__init__)
             auth_kw = {}
@@ -132,6 +149,7 @@ def process_audio(
 
             diarize_segments = diarize_model(audio, min_speakers=min_spk, max_speakers=max_spk)
             result = whisperx.assign_word_speakers(diarize_segments, result)
+            mark("Диаризация", t_diar)
         except Exception as diarize_err:
             err_msg = str(diarize_err)
             if "403" in err_msg or "Gated" in err_msg or "gated" in err_msg or "401" in err_msg:
@@ -188,6 +206,13 @@ def process_audio(
             output_lines.append(f"[{sm:02d}:{ss:02d} - {em:02d}:{es:02d}] {current_speaker}:\n{' '.join(current_text)}\n")
 
         formatted_text = "\n".join(output_lines)
+
+        total = time.time() - t_run
+        print("--> Время по этапам:")
+        for stage, sec in timings.items():
+            print(f"      {stage}: {sec:.0f} с ({sec / total * 100:.0f}%)")
+        print(f"      Итого в контейнере: {total:.0f} с")
+
         return formatted_text
 
     finally:

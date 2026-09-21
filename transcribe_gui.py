@@ -492,9 +492,36 @@ class TranscribeApp:
         elif self.selected_file and self.selected_file.exists():
             subprocess.run(["open", "-R", str(self.selected_file)])
 
+    def on_close(self):
+        """Закрытие окна не должно оставлять работающую задачу в облаке.
+
+        python запускается дочерним процессом, поэтому при закрытии окна он
+        осиротеет и продолжит крутить оплачиваемый GPU до самого конца.
+        """
+        if self.is_running and self.current_process:
+            if not messagebox.askokcancel(
+                "Идёт транскрибация",
+                "Задача ещё выполняется в облаке.\n"
+                "Закрыть окно и остановить её?",
+                parent=self.root,
+            ):
+                return
+            self.was_cancelled = True
+            try:
+                self.current_process.terminate()
+                self.current_process.wait(timeout=5)
+            except Exception:
+                try:
+                    self.current_process.kill()
+                except Exception:
+                    pass
+        self.root.destroy()
+
+
 def main():
     root = tk.Tk()
     app = TranscribeApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
 
 if __name__ == "__main__":
