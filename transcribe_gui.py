@@ -1,3 +1,4 @@
+import os
 import shlex
 import shutil
 import tempfile
@@ -310,9 +311,15 @@ class TranscribeApp:
             "echo\n"
             "if [ $status -eq 0 ]; then echo '✅ Готово.'; else echo \"❌ Завершилось с кодом $status\"; fi\n"
             "echo 'Окно можно закрыть.'\n"
+            "rm -f -- \"$0\"\n"
         )
-        launcher = Path(tempfile.gettempdir()) / "ai_transcriber_run.command"
-        launcher.write_text(script, encoding="utf-8")
+        # Уникальное имя: при параллельных запусках общий файл успевал
+        # перезаписаться до того, как Терминал его прочитает, и оба окна
+        # уходили транскрибировать одно и то же.
+        fd, name = tempfile.mkstemp(prefix="ai_transcriber_", suffix=".command")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(script)
+        launcher = Path(name)
         launcher.chmod(0o755)
         return launcher
 
