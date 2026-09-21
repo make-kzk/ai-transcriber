@@ -141,7 +141,7 @@ def process_audio(
             output_lines.append(f"[{sm:02d}:{ss:02d} - {em:02d}:{es:02d}] {current_speaker}:\n{' '.join(current_text)}\n")
 
         formatted_text = "\n".join(output_lines)
-        return formatted_text, result
+        return formatted_text
 
     finally:
         if os.path.exists(temp_audio_path):
@@ -169,7 +169,7 @@ def main(
     with open(path, "rb") as f:
         audio_bytes = f.read()
 
-    formatted_text, raw_result = process_audio.remote(
+    formatted_text = process_audio.remote(
         audio_bytes=audio_bytes,
         filename=path.name,
         language=language,

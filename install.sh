@@ -14,7 +14,7 @@ fi
 VENV_DIR="$HOME/.modal-venv"
 echo "Создание Python окружения в $VENV_DIR..."
 uv venv --python 3.11 "$VENV_DIR" --clear
-uv pip install --python "$VENV_DIR/bin/python" modal
+uv pip install --python "$VENV_DIR/bin/python" modal numpy
 
 # 3. Копирование скриптов в ~/.local/bin
 mkdir -p "$HOME/.local/bin"
