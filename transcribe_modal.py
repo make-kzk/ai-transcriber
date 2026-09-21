@@ -1,6 +1,5 @@
 import os
 import sys
-import shutil
 from pathlib import Path
 import modal
 
@@ -8,7 +7,7 @@ import modal
 # Модели скачиваются 1 раз и сохраняются навсегда, повторные запуски стартуют за секунды!
 model_volume = modal.Volume.from_name("whisperx-models-cache", create_if_missing=True)
 
-# 2. Неизменяемый образ с поддержкой CUDA и стабильными версиями библиотек
+# 2. Неизменяемый образ с поддержкой CUDA и стабильными проверенными версиями библиотек
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "ffmpeg")
@@ -18,9 +17,16 @@ image = (
         index_url="https://download.pytorch.org/whl/cu121",
     )
     .pip_install(
-        "git+https://github.com/m-bain/whisperx.git",
+        "whisperx==3.3.1",
         "pyannote.audio==3.3.2",
+        "transformers==4.48.3",
+        "ctranslate2==4.4.0",
     )
+    .env({
+        "HF_HOME": "/root/.cache/huggingface",
+        "TORCH_HOME": "/root/.cache/torch",
+        "NLTK_DATA": "/root/.cache/nltk_data",
+    })
 )
 
 app = modal.App("whisperx-transcriber")
@@ -40,13 +46,11 @@ def process_audio(
     min_speakers: int = None,
     max_speakers: int = None,
 ):
+    import inspect
     import tempfile
     import torch
     import whisperx
     from whisperx.diarize import DiarizationPipeline
-
-    os.environ["HF_HOME"] = "/root/.cache/huggingface"
-    os.environ["TORCH_HOME"] = "/root/.cache/torch"
 
     hf_token = os.environ.get("HF_TOKEN")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -95,10 +99,17 @@ def process_audio(
         # 3. Диаризация (определение спикеров)
         print("--> [3/3] Определение спикеров нейросетью Pyannote...")
         try:
+            sig = inspect.signature(DiarizationPipeline.__init__)
+            auth_kw = {}
+            if "token" in sig.parameters:
+                auth_kw["token"] = hf_token
+            elif "use_auth_token" in sig.parameters:
+                auth_kw["use_auth_token"] = hf_token
+
             diarize_model = DiarizationPipeline(
                 model_name="pyannote/speaker-diarization-3.1",
-                token=hf_token,
                 device=device,
+                **auth_kw,
             )
             if num_speakers:
                 min_spk = num_speakers
@@ -110,16 +121,7 @@ def process_audio(
             diarize_segments = diarize_model(audio, min_speakers=min_spk, max_speakers=max_spk)
             result = whisperx.assign_word_speakers(diarize_segments, result)
         except Exception as diarize_err:
-            err_msg = str(diarize_err)
-            if "speaker-diarization-community-1" in err_msg or "403" in err_msg or "Gated" in err_msg:
-                raise RuntimeError(
-                    "❌ Ошибка доступа Hugging Face: требуется подтвердить доступ к модели.\n"
-                    "Пожалуйста, откройте ссылку в браузере:\n"
-                    "👉 https://huggingface.co/pyannote/speaker-diarization-community-1\n"
-                    "и нажмите кнопку «Agree and access repository» (это бесплатно).\n"
-                    "После этого повторите запуск транскрибации."
-                ) from diarize_err
-            print(f"Внимание: Ошибка диаризации ({diarize_err}), форматируем без разделения по спикерам.")
+            raise RuntimeError(f"❌ Ошибка на шаге диаризации (Pyannote): {diarize_err}") from diarize_err
 
         # Фиксация кеша в persistent volume
         try:

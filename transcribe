@@ -1,8 +1,26 @@
 #!/bin/bash
 # Облачная транскрибация аудио с разделением по ролям на базе Modal GPU (WhisperX + Pyannote)
 
-SCRIPT_PATH="/Users/maksim/.local/bin/transcribe_modal.py"
-MODAL_BIN="/Users/maksim/.local/bin/modal"
+if command -v modal &> /dev/null; then
+    MODAL_BIN="$(command -v modal)"
+elif [ -f "$HOME/.modal-venv/bin/modal" ]; then
+    MODAL_BIN="$HOME/.modal-venv/bin/modal"
+elif [ -f "$HOME/.local/bin/modal" ]; then
+    MODAL_BIN="$HOME/.local/bin/modal"
+else
+    echo "Ошибка: Утилита modal не найдена. Запустите install.sh"
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/transcribe_modal.py" ]; then
+    SCRIPT_PATH="$SCRIPT_DIR/transcribe_modal.py"
+elif [ -f "$HOME/.local/bin/transcribe_modal.py" ]; then
+    SCRIPT_PATH="$HOME/.local/bin/transcribe_modal.py"
+else
+    echo "Ошибка: transcribe_modal.py не найден."
+    exit 1
+fi
 
 if [ -z "$1" ]; then
     echo "Использование: transcribe <аудиофайл> [--speakers N] [--language ru]"
@@ -14,4 +32,4 @@ fi
 FILE="$1"
 shift
 
-"$MODAL_BIN" run "$SCRIPT_PATH" --file "$FILE" "$@"
+exec "$MODAL_BIN" run "$SCRIPT_PATH" --file "$FILE" "$@"

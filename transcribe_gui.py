@@ -4,7 +4,6 @@ import time
 import shutil
 import subprocess
 import threading
-import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -311,6 +310,7 @@ class TranscribeApp:
 
     def cancel_transcription(self):
         if self.current_process and self.is_running:
+            self.was_cancelled = True
             self._log_msg("\n🛑 Отмена процесса пользователем...")
             try:
                 self.current_process.terminate()
@@ -374,6 +374,13 @@ class TranscribeApp:
         self.btn_start.config(text="🚀  Начать транскрибацию", state="normal", bg="#0071E3")
         self.btn_cancel.config(state="disabled")
         self.btn_select.config(state="normal")
+        self.current_process = None
+
+        if self.was_cancelled:
+            self.lbl_status.config(text="🛑 Транскрибация отменена", foreground="#FF9500")
+            self._log_msg("🛑 Транскрибация была отменена пользователем.")
+            self.was_cancelled = False
+            return
 
         elapsed = int(time.time() - self.start_time) if self.start_time else 0
         em, es = divmod(elapsed, 60)
