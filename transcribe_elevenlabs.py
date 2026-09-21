@@ -16,20 +16,15 @@
 """
 import argparse
 import os
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import httpx
 
+import transcript_utils as tu
+
 API_URL = "https://api.elevenlabs.io/v1/speech-to-text"
-SEG_RE = re.compile(r"^\[(\d\d):(\d\d) - (\d\d):(\d\d)\] (SPEAKER_\d+):$")
-
-
-def mmss(seconds: float) -> str:
-    m, s = divmod(int(seconds), 60)
-    return f"{m:02d}:{s:02d}"
 
 
 def recognize(audio: Path, api_key: str, language: str, speakers: int | None,
@@ -63,75 +58,11 @@ def recognize(audio: Path, api_key: str, language: str, speakers: int | None,
 def words_of(payload):
     """Только слова: разметка пауз и звуковых событий нам не нужна."""
     return [
-        w for w in payload.get("words", [])
+        {"text": w["text"], "start": w["start"], "end": w["end"],
+         "speaker": w.get("speaker_id")}
+        for w in payload.get("words", [])
         if w.get("type") == "word" and w.get("start") is not None
     ]
-
-
-def native_transcript(words):
-    """Разбивка и диаризация самого ElevenLabs."""
-    out, speaker, buf, start, end = [], None, [], 0.0, 0.0
-
-    def flush():
-        if buf:
-            out.append(f"[{mmss(start)} - {mmss(end)}] {speaker}:\n{' '.join(buf).strip()}\n")
-
-    for w in words:
-        spk = normalize_speaker(w.get("speaker_id"))
-        if spk != speaker:
-            flush()
-            speaker, buf, start = spk, [], w["start"]
-        buf.append(w["text"])
-        end = w["end"]
-    flush()
-    return "\n".join(out)
-
-
-def normalize_speaker(raw) -> str:
-    """speaker_1 -> SPEAKER_00, чтобы формат совпадал с нашим."""
-    if not raw:
-        return "SPEAKER_00"
-    m = re.search(r"(\d+)", str(raw))
-    n = int(m.group(1)) if m else 0
-    return f"SPEAKER_{max(0, n - 1):02d}"
-
-
-def parse_reference(path: Path):
-    """Реплики эталонной расшифровки: границы по времени и метка спикера."""
-    segs = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        m = SEG_RE.match(line.strip())
-        if m:
-            segs.append({
-                "head": line.strip(),
-                "start": int(m.group(1)) * 60 + int(m.group(2)),
-                "end": int(m.group(3)) * 60 + int(m.group(4)),
-            })
-    return segs
-
-
-def fitted_transcript(words, reference):
-    """Раскладывает слова ElevenLabs по репликам эталона.
-
-    Сверять построчно можно только расшифровки с одинаковой разбивкой,
-    а ElevenLabs режет речь по-своему. Берём его слова и распределяем
-    по временным окнам эталона — тогда сравнивается текст в одних и тех
-    же отрезках записи, а не случайно совпавшие куски.
-    """
-    buckets = [[] for _ in reference]
-    for w in words:
-        mid = (w["start"] + w["end"]) / 2
-        for i, seg in enumerate(reference):
-            if seg["start"] <= mid <= seg["end"] + 1:
-                buckets[i].append(w["text"])
-                break
-
-    out = []
-    for seg, bucket in zip(reference, buckets):
-        out.append(seg["head"])
-        out.append(" ".join(bucket).strip() or "—")
-        out.append("")
-    return "\n".join(out)
 
 
 def main():
@@ -165,53 +96,30 @@ def main():
                         args.model, args.timeout)
     words = words_of(payload)
     duration = payload.get("audio_duration_secs")
-    speakers_found = len({w.get("speaker_id") for w in words})
-    print(f"✅ Распознано слов: {len(words)}, голосов: {speakers_found}"
-          + (f", длительность: {mmss(duration)}" if duration else ""))
+    speaker_of = tu.SpeakerMap()
+    print(f"✅ Распознано слов: {len(words)}"
+          + (f", длительность: {tu.mmss(duration)}" if duration else ""))
 
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     base = args.audio.with_name(f"{args.audio.stem}_elevenlabs_{stamp}.txt")
-    base.write_text(native_transcript(words), encoding="utf-8")
+    base.write_text(tu.native_transcript(words, speaker_of), encoding="utf-8")
     print(f"📄 Расшифровка ElevenLabs: {base.name}")
 
     if args.reference:
         if not args.reference.exists():
             sys.exit(f"Эталон не найден: {args.reference}")
-        reference = parse_reference(args.reference)
+        reference = tu.parse_reference(args.reference)
         if not reference:
             sys.exit(f"В эталоне не найдено ни одной реплики: {args.reference.name}")
         fitted = base.with_name(f"{args.audio.stem}_elevenlabs_свод_{stamp}.txt")
-        fitted.write_text(fitted_transcript(words, reference), encoding="utf-8")
+        fitted.write_text(tu.fitted_transcript(words, reference), encoding="utf-8")
         print(f"📐 Подогнано под разбивку эталона ({len(reference)} реплик): {fitted.name}")
 
         if args.compare:
-            run_comparison(args.reference, fitted)
+            tu.run_comparison(args.reference, fitted, "elevenlabs")
         else:
             print("\nТеперь сверка:")
             print(f'  python compare_transcripts.py "{args.reference.name}" "{fitted.name}"')
-
-
-def run_comparison(base: Path, other: Path):
-    """Сводит расшифровки и помечает расхождения — тем же кодом, что и вручную."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    try:
-        import compare_transcripts as ct
-    except ImportError:
-        print("Не найден compare_transcripts.py — сверка пропущена.")
-        return
-
-    base_segs, other_segs = ct.parse(base), ct.parse(other)
-    body, findings = ct.compare(base_segs, other_segs)
-    header = ct.render_header(findings, base.name, other.name, base_segs)
-    out = base.with_name(base.stem + "_сверка_elevenlabs.txt")
-    out.write_text(header + body, encoding="utf-8")
-
-    crit = sum(1 for f in findings if f["level"] == "critical")
-    cont = sum(1 for f in findings if f["level"] == "content")
-    print(f"\n🔍 Сверка с независимой системой:")
-    print(f"   критичных расхождений: {crit}")
-    print(f"   смысловых разночтений: {cont}")
-    print(f"📋 {out.name}")
 
 
 if __name__ == "__main__":
