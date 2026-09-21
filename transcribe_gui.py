@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import shutil
 import subprocess
 import threading
 import webbrowser
@@ -8,14 +9,41 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-MODAL_BIN = "/Users/maksim/.local/bin/modal"
-SCRIPT_PATH = "/Users/maksim/.local/bin/transcribe_modal.py"
+# Автоматическое динамическое определение путей
+HOME = Path.home()
+
+def find_modal_bin():
+    if shutil.which("modal"):
+        return shutil.which("modal")
+    for candidate in [
+        HOME / ".local/bin/modal",
+        HOME / ".modal-venv/bin/modal",
+        Path("/usr/local/bin/modal"),
+        Path("/opt/homebrew/bin/modal"),
+    ]:
+        if candidate.exists():
+            return str(candidate)
+    return "modal"
+
+MODAL_BIN = find_modal_bin()
+
+def find_script_path():
+    repo_script = Path(__file__).resolve().parent / "transcribe_modal.py"
+    if repo_script.exists():
+        return str(repo_script)
+    local_script = HOME / ".local/bin/transcribe_modal.py"
+    if local_script.exists():
+        return str(local_script)
+    return "transcribe_modal.py"
+
+SCRIPT_PATH = find_script_path()
+
 
 class TranscribeApp:
     def __init__(self, root):
         self.root = root
         self.root.title("AI Транскрибация (WhisperX + GPU)")
-        self.root.geometry("680x640")
+        self.root.geometry("700x670")
         self.root.minsize(620, 560)
 
         self.selected_file = None
@@ -23,6 +51,7 @@ class TranscribeApp:
         self.is_running = False
         self.start_time = None
         self.timer_id = None
+        self.current_process = None
 
         self._setup_style()
         self._build_ui()
@@ -87,66 +116,88 @@ class TranscribeApp:
         self.lang_combo = ttk.Combobox(opts_grid, textvariable=self.lang_var, values=["Русский (ru)", "Английский (en)", "Автоопределение"], width=15, state="readonly")
         self.lang_combo.grid(row=0, column=3, sticky="w", pady=3)
 
-        # 4. Большая кнопка СТАРТ
+        # 4. Панель кнопок: СТАРТ и ОТМЕНА
+        btn_box = ttk.Frame(main_container)
+        btn_box.pack(fill="x", pady=(0, 12))
+
         self.btn_start = tk.Button(
-            main_container,
+            btn_box,
             text="🚀  Начать транскрибацию",
-            font=("SF Pro Text", 14, "bold"),
+            font=("SF Pro Text", 13, "bold"),
             bg="#0071E3",
             fg="#FFFFFF",
             activebackground="#0077ED",
             activeforeground="#FFFFFF",
             relief="flat",
             padx=15,
-            pady=10,
+            pady=8,
             cursor="pointinghand",
             command=self.start_transcription,
-            state="disabled"
+            state="disabled",
         )
-        self.btn_start.pack(fill="x", pady=(0, 10))
+        self.btn_start.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-        # 5. Карточка интерактивного процессинга (Прогресс-бар + Секундомер + Статус)
-        self.proc_card = ttk.Frame(main_container, style="Card.TFrame", padding=14)
-        self.proc_card.pack(fill="x", pady=(0, 10))
+        self.btn_cancel = tk.Button(
+            btn_box,
+            text="🛑 Отмена",
+            font=("SF Pro Text", 13),
+            bg="#FF3B30",
+            fg="#FFFFFF",
+            activebackground="#D32F2F",
+            activeforeground="#FFFFFF",
+            relief="flat",
+            padx=12,
+            pady=8,
+            cursor="pointinghand",
+            command=self.cancel_transcription,
+            state="disabled",
+        )
+        self.btn_cancel.pack(side="right")
 
-        proc_top_row = ttk.Frame(self.proc_card, style="Card.TFrame")
-        proc_top_row.pack(fill="x", pady=(0, 8))
+        # 5. Карточка статуса и прогресса
+        status_card = ttk.Frame(main_container, style="Card.TFrame", padding=14)
+        status_card.pack(fill="x", pady=(0, 10))
 
-        self.lbl_status = ttk.Label(proc_top_row, text="💤 Ожидание запуска", style="Status.TLabel")
+        status_header = ttk.Frame(status_card, style="Card.TFrame")
+        status_header.pack(fill="x", pady=(0, 6))
+
+        self.lbl_status = ttk.Label(status_header, text="Ожидание файла", style="Status.TLabel")
         self.lbl_status.pack(side="left")
 
-        self.lbl_timer = ttk.Label(proc_top_row, text="00:00", style="Timer.TLabel")
+        self.lbl_timer = ttk.Label(status_header, text="00:00", style="Timer.TLabel")
         self.lbl_timer.pack(side="right")
 
-        # Анимированная полоса прогресса
-        self.progress_bar = ttk.Progressbar(self.proc_card, mode="indeterminate")
-        self.progress_bar.pack(fill="x", pady=(0, 6))
+        self.progress_bar = ttk.Progressbar(status_card, mode="indeterminate", length=400)
+        self.progress_bar.pack(fill="x", pady=(4, 6))
 
-        # Ссылка на веб-монитор
-        proc_bottom_row = ttk.Frame(self.proc_card, style="Card.TFrame")
-        proc_bottom_row.pack(fill="x")
+        info_box = ttk.Frame(status_card, style="Card.TFrame")
+        info_box.pack(fill="x")
 
-        self.lbl_modal_link = tk.Label(
-            proc_bottom_row,
-            text="Открыть веб-монитор Modal ↗",
-            font=("SF Pro Text", 10, "underline"),
-            fg="#0071E3",
-            bg="#FFFFFF",
-            cursor="pointinghand"
+        self.lbl_modal_link = ttk.Label(
+            info_box,
+            text="🌐 Открыть панель Modal в браузере",
+            style="Card.TLabel",
+            foreground="#0071E3",
+            cursor="pointinghand",
+            font=("SF Pro Text", 11, "underline")
         )
-        self.lbl_modal_link.pack(side="right")
+        self.lbl_modal_link.pack(side="left")
         self.lbl_modal_link.bind("<Button-1>", lambda e: webbrowser.open("https://modal.com/apps"))
 
-        # 6. Окно детальных логов
-        log_frame = ttk.Frame(main_container)
-        log_frame.pack(fill="both", expand=True)
+        # 6. Консоль журнала (Terminal-like Log View)
+        log_card = ttk.Frame(main_container, style="Card.TFrame", padding=10)
+        log_card.pack(fill="both", expand=True)
+
+        lbl_log = ttk.Label(log_card, text="Журнал работы в реальном времени:", style="Card.TLabel", font=("SF Pro Text", 11, "bold"))
+        lbl_log.pack(anchor="w", pady=(0, 4))
 
         self.log_text = tk.Text(
-            log_frame,
+            log_card,
             wrap="word",
-            font=("Menlo", 10),
-            bg="#FFFFFF",
-            fg="#1D1D1F",
+            font=("Menlo", 11),
+            bg="#1E1E1E",
+            fg="#D4D4D4",
+            insertbackground="#FFFFFF",
             relief="solid",
             borderwidth=1,
             padx=8,
@@ -174,11 +225,15 @@ class TranscribeApp:
         chosen = filedialog.askopenfilename(title="Выберите аудиофайл", filetypes=filetypes)
         if chosen:
             self.selected_file = Path(chosen)
-            size_mb = self.selected_file.stat().st_size / (1024 * 1024)
-            self.lbl_file_name.config(
-                text=f"{self.selected_file.name} ({size_mb:.1f} МБ)",
-                foreground="#1D1D1F"
-            )
+            try:
+                size_mb = self.selected_file.stat().st_size / (1024 * 1024)
+                self.lbl_file_name.config(
+                    text=f"{self.selected_file.name} ({size_mb:.1f} МБ)",
+                    foreground="#1D1D1F"
+                )
+            except Exception:
+                self.lbl_file_name.config(text=f"{self.selected_file.name}", foreground="#1D1D1F")
+
             self.btn_start.config(state="normal", bg="#0071E3")
             self.lbl_status.config(text="Готов к запуску", foreground="#1D1D1F")
             self._log_msg(f"Выбран файл: {self.selected_file.name}")
@@ -189,14 +244,15 @@ class TranscribeApp:
         self.log_text.see("end")
         self.log_text.config(state="disabled")
 
-        # Анализ вывода для обновления статусной строки
-        if "[1/3]" in text or "распознавание" in text.lower():
+        # Обновление текста в статус-строке на основе сообщений
+        text_lower = text.lower()
+        if "[1/3]" in text or "распознавание" in text_lower:
             self.lbl_status.config(text="🎙️ [1/3] Распознавание речи WhisperX...", foreground="#0071E3")
-        elif "[2/3]" in text or "выравнивание" in text.lower():
+        elif "[2/3]" in text or "выравнивание" in text_lower:
             self.lbl_status.config(text="⏱️ [2/3] Выравнивание таймкодов...", foreground="#5856D6")
-        elif "[3/3]" in text or "спикеров" in text.lower() or "pyannote" in text.lower():
+        elif "[3/3]" in text or "спикеров" in text_lower or "pyannote" in text_lower:
             self.lbl_status.config(text="👥 [3/3] Определение голосов (Pyannote)...", foreground="#AF52DE")
-        elif "Initialized" in text or "Building" in text:
+        elif "initialized" in text_lower or "building" in text_lower or "step" in text_lower:
             self.lbl_status.config(text="⚡️ Инициализация облачного GPU...", foreground="#FF9500")
 
     def _update_timer(self):
@@ -216,6 +272,7 @@ class TranscribeApp:
         self._update_timer()
 
         self.btn_start.config(text="⏳  Идет обработка в облаке...", state="disabled", bg="#D2D2D7")
+        self.btn_cancel.config(state="normal")
         self.btn_select.config(state="disabled")
         self.btn_open_file.config(state="disabled")
         self.btn_open_dir.config(state="disabled")
@@ -252,12 +309,28 @@ class TranscribeApp:
         thread = threading.Thread(target=self._run_process, args=(cmd,), daemon=True)
         thread.start()
 
+    def cancel_transcription(self):
+        if self.current_process and self.is_running:
+            self._log_msg("\n🛑 Отмена процесса пользователем...")
+            try:
+                self.current_process.terminate()
+                self.root.after(2000, self._force_kill_if_needed)
+            except Exception as e:
+                self._log_msg(f"Ошибка при отмене: {e}")
+
+    def _force_kill_if_needed(self):
+        if self.current_process and self.current_process.poll() is None:
+            try:
+                self.current_process.kill()
+            except Exception:
+                pass
+
     def _run_process(self, cmd):
         try:
             env = dict(os.environ)
             env["PYTHONUNBUFFERED"] = "1"
 
-            process = subprocess.Popen(
+            self.current_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -267,13 +340,25 @@ class TranscribeApp:
                 env=env,
             )
 
-            for line in iter(process.stdout.readline, ""):
-                clean_line = line.strip()
-                if clean_line:
-                    self.root.after(0, self._log_msg, clean_line)
+            # Чтение посимвольно/построчно с поддержкой \r и \n для реального времени
+            buffer = ""
+            while True:
+                char = self.current_process.stdout.read(1)
+                if not char:
+                    break
+                if char in ("\r", "\n"):
+                    clean = buffer.strip()
+                    if clean:
+                        self.root.after(0, self._log_msg, clean)
+                    buffer = ""
+                else:
+                    buffer += char
+            
+            if buffer.strip():
+                self.root.after(0, self._log_msg, buffer.strip())
 
-            process.stdout.close()
-            ret_code = process.wait()
+            self.current_process.stdout.close()
+            ret_code = self.current_process.wait()
 
             self.root.after(0, self._on_finished, ret_code)
         except Exception as e:
@@ -287,6 +372,7 @@ class TranscribeApp:
             self.root.after_cancel(self.timer_id)
 
         self.btn_start.config(text="🚀  Начать транскрибацию", state="normal", bg="#0071E3")
+        self.btn_cancel.config(state="disabled")
         self.btn_select.config(state="normal")
 
         elapsed = int(time.time() - self.start_time) if self.start_time else 0
@@ -298,12 +384,18 @@ class TranscribeApp:
             self.btn_open_file.config(state="normal")
             self.btn_open_dir.config(state="normal")
 
-            subprocess.run(["afplay", "/System/Library/Sounds/Glass.aiff"], capture_output=True)
-            os.system(f'osascript -e \'display notification "Транскрибация успешно завершена за {em:02d}:{es:02d}!" with title "AI Транскрибатор"\'')
-            messagebox.showinfo("Готово!", f"Транскрибация завершена успешно за {em:02d}:{es:02d}!\nРезультат сохранен в:\n{self.result_file.name}")
+            try:
+                subprocess.run(["afplay", "/System/Library/Sounds/Glass.aiff"], capture_output=True)
+                os.system(f'osascript -e \'display notification "Транскрибация успешно завершена за {em:02d}:{es:02d}!" with title "AI Транскрибатор"\'')
+            except Exception:
+                pass
+            messagebox.showinfo("Готово!", f"Транскрибация завершена успешно за {em:02d}:{es:02d}!\nРезультат сохранен рядом с аудиофайлом:\n{self.result_file.name}", parent=self.root)
         else:
-            self.lbl_status.config(text="❌ Ошибка выполнения", foreground="#FF3B30")
-            messagebox.showerror("Ошибка", "Произошла ошибка при выполнении. Подробности в окне лога.")
+            self.lbl_status.config(text="❌ Ошибка выполнения (см. журнал)", foreground="#FF3B30")
+            try:
+                subprocess.run(["afplay", "/System/Library/Sounds/Basso.aiff"], capture_output=True)
+            except Exception:
+                pass
 
     def open_result_file(self):
         if self.result_file and self.result_file.exists():

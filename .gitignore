@@ -11,7 +11,9 @@ venv/
 
 # Modal & Secrets
 .modal/
-*.toml
+.modal.toml
+secrets.toml
+!pyproject.toml
 *.env
 *.token
 

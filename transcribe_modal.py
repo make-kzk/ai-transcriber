@@ -1,20 +1,25 @@
 import os
 import sys
-import argparse
+import shutil
 from pathlib import Path
 import modal
 
-# 1. Задаем неизменяемый Docker-образ с CUDA и стабильными версиями WhisperX и Pyannote
+# 1. Постоянный том для кеширования весов моделей (Whisper, wav2vec2, Pyannote, NLTK)
+# Модели скачиваются 1 раз и сохраняются навсегда, повторные запуски стартуют за секунды!
+model_volume = modal.Volume.from_name("whisperx-models-cache", create_if_missing=True)
+
+# 2. Неизменяемый образ с поддержкой CUDA и стабильными версиями библиотек
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "ffmpeg")
     .pip_install(
-        "torch",
-        "torchaudio",
+        "torch==2.5.1",
+        "torchaudio==2.5.1",
         index_url="https://download.pytorch.org/whl/cu121",
     )
     .pip_install(
         "git+https://github.com/m-bain/whisperx.git",
+        "pyannote.audio==3.3.2",
     )
 )
 
@@ -25,6 +30,7 @@ app = modal.App("whisperx-transcriber")
     gpu="A10G",  # Высокопроизводительная серверная видеокарта Nvidia A10G (24 GB)
     timeout=900,
     secrets=[modal.Secret.from_name("huggingface-secret")],
+    volumes={"/root/.cache": model_volume},
 )
 def process_audio(
     audio_bytes: bytes,
@@ -37,17 +43,22 @@ def process_audio(
     import tempfile
     import torch
     import whisperx
+    from whisperx.diarize import DiarizationPipeline
+
+    os.environ["HF_HOME"] = "/root/.cache/huggingface"
+    os.environ["TORCH_HOME"] = "/root/.cache/torch"
 
     hf_token = os.environ.get("HF_TOKEN")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     compute_type = "float16" if device == "cuda" else "int8"
 
-    suffix = Path(filename).suffix or ".m4a"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
-        temp_file.write(audio_bytes)
-        temp_audio_path = temp_file.name
-
+    temp_audio_path = None
     try:
+        suffix = Path(filename).suffix or ".m4a"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+            temp_file.write(audio_bytes)
+            temp_audio_path = temp_file.name
+
         print(f"--> [1/3] Загрузка и распознавание аудио ({filename}) с моделью large-v2...")
         audio = whisperx.load_audio(temp_audio_path)
         
@@ -57,6 +68,7 @@ def process_audio(
             device=device,
             compute_type=compute_type,
             language=language if language != "auto" else None,
+            download_root="/root/.cache/torch/whisperx",
         )
         result = whisper_model.transcribe(audio, batch_size=16)
         detected_lang = result.get("language", language)
@@ -80,33 +92,42 @@ def process_audio(
         except Exception as align_err:
             print(f"Внимание: Выравнивание пропущено ({align_err}), используем базовые сегменты.")
 
-        # 3. Диаризация (разделение по голосам)
+        # 3. Диаризация (определение спикеров)
         print("--> [3/3] Определение спикеров нейросетью Pyannote...")
-        from whisperx.diarize import DiarizationPipeline
         try:
             diarize_model = DiarizationPipeline(
                 model_name="pyannote/speaker-diarization-3.1",
                 token=hf_token,
                 device=device,
             )
-        except TypeError:
-            diarize_model = DiarizationPipeline(
-                model_name="pyannote/speaker-diarization-3.1",
-                use_auth_token=hf_token,
-                device=device,
-            )
-        
-        if num_speakers:
-            min_spk = num_speakers
-            max_spk = num_speakers
-        else:
-            min_spk = min_speakers
-            max_spk = max_speakers
+            if num_speakers:
+                min_spk = num_speakers
+                max_spk = num_speakers
+            else:
+                min_spk = min_speakers
+                max_spk = max_speakers
 
-        diarize_segments = diarize_model(audio, min_speakers=min_spk, max_speakers=max_spk)
-        result = whisperx.assign_word_speakers(diarize_segments, result)
+            diarize_segments = diarize_model(audio, min_speakers=min_spk, max_speakers=max_spk)
+            result = whisperx.assign_word_speakers(diarize_segments, result)
+        except Exception as diarize_err:
+            err_msg = str(diarize_err)
+            if "speaker-diarization-community-1" in err_msg or "403" in err_msg or "Gated" in err_msg:
+                raise RuntimeError(
+                    "❌ Ошибка доступа Hugging Face: требуется подтвердить доступ к модели.\n"
+                    "Пожалуйста, откройте ссылку в браузере:\n"
+                    "👉 https://huggingface.co/pyannote/speaker-diarization-community-1\n"
+                    "и нажмите кнопку «Agree and access repository» (это бесплатно).\n"
+                    "После этого повторите запуск транскрибации."
+                ) from diarize_err
+            print(f"Внимание: Ошибка диаризации ({diarize_err}), форматируем без разделения по спикерам.")
 
-        # Форматирование аккуратного читаемого диалога
+        # Фиксация кеша в persistent volume
+        try:
+            model_volume.commit()
+        except Exception:
+            pass
+
+        # Форматирование читаемого диалога
         output_lines = []
         current_speaker = None
         current_text = []
@@ -144,8 +165,11 @@ def process_audio(
         return formatted_text
 
     finally:
-        if os.path.exists(temp_audio_path):
-            os.remove(temp_audio_path)
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.remove(temp_audio_path)
+            except Exception:
+                pass
 
 
 @app.local_entrypoint()
