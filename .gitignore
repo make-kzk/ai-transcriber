@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.venv
+
+# Modal & Secrets
+.modal/
+*.toml
+*.env
+*.token
+
+# Media & Outputs
+*.m4a
+*.mp3
+*.wav
+*.mp4
+*.mov
+*_транскрибация.txt
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride

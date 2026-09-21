@@ -1,0 +1,17 @@
+#!/bin/bash
+# Облачная транскрибация аудио с разделением по ролям на базе Modal GPU (WhisperX + Pyannote)
+
+SCRIPT_PATH="/Users/maksim/.local/bin/transcribe_modal.py"
+MODAL_BIN="/Users/maksim/.local/bin/modal"
+
+if [ -z "$1" ]; then
+    echo "Использование: transcribe <аудиофайл> [--speakers N] [--language ru]"
+    echo "Пример: transcribe meeting.m4a"
+    echo "        transcribe meeting.m4a --speakers 2"
+    exit 1
+fi
+
+FILE="$1"
+shift
+
+"$MODAL_BIN" run "$SCRIPT_PATH" --file "$FILE" "$@"
