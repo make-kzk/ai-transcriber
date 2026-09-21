@@ -46,7 +46,6 @@ class TranscribeApp:
         self.root.minsize(620, 560)
 
         self.selected_file = None
-        self.result_file = None
 
         self._setup_style()
         self._build_ui()
@@ -255,8 +254,6 @@ class TranscribeApp:
                "--file", str(self.selected_file),
                "--language", lang_code] + speakers_arg
 
-        self.result_file = self.selected_file.with_name(
-            f"{self.selected_file.stem}_транскрибация.txt")
 
         try:
             launcher = self._write_terminal_script(cmd)
@@ -272,7 +269,7 @@ class TranscribeApp:
         self._log_msg(f"Запущено в Терминале: {self.selected_file.name}")
         self._log_msg(f"Параметры: Язык = {lang_code}, Спикеры = {spk_val}")
         self._log_msg("Ход работы смотрите в открывшемся окне Терминала.")
-        self._log_msg(f"Результат: {self.result_file.name}")
+        self._log_msg("Результат ляжет рядом с аудио, с датой и временем в имени.")
         self._log_msg("=" * 50)
 
         # Результат появится, когда отработает Терминал; кнопки проверяют наличие файла.
@@ -297,15 +294,34 @@ class TranscribeApp:
         launcher.chmod(0o755)
         return launcher
 
+    def _latest_result(self):
+        """Самый свежий результат для выбранного аудио.
+
+        Имя содержит дату и время прогона, поэтому вычислить его заранее
+        нельзя — ищем по маске и берём последний по времени изменения.
+        """
+        if not self.selected_file:
+            return None
+        folder = self.selected_file.parent
+        pattern = f"{self.selected_file.stem}_транскрибация*.txt"
+        found = sorted(folder.glob(pattern), key=lambda f: f.stat().st_mtime)
+        return found[-1] if found else None
+
     def open_result_file(self):
-        if self.result_file and self.result_file.exists():
-            subprocess.run(["open", str(self.result_file)])
+        result = self._latest_result()
+        if result:
+            subprocess.run(["open", str(result)])
+        else:
+            messagebox.showinfo(
+                "Результата пока нет",
+                "Файл ещё не готов — дождитесь завершения в окне Терминала.",
+                parent=self.root,
+            )
 
     def open_result_dir(self):
-        if self.result_file and self.result_file.exists():
-            subprocess.run(["open", "-R", str(self.result_file)])
-        elif self.selected_file and self.selected_file.exists():
-            subprocess.run(["open", "-R", str(self.selected_file)])
+        target = self._latest_result() or self.selected_file
+        if target and target.exists():
+            subprocess.run(["open", "-R", str(target)])
 
 def main():
     root = tk.Tk()

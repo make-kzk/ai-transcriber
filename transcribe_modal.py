@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 import modal
 
@@ -57,6 +58,7 @@ def process_audio(
     num_speakers: int = None,
     min_speakers: int = None,
     max_speakers: int = None,
+    model_name: str = "large-v3",
 ):
     import time
     import inspect
@@ -83,13 +85,13 @@ def process_audio(
             temp_file.write(audio_bytes)
             temp_audio_path = temp_file.name
 
-        print(f"--> [1/3] Загрузка и распознавание аудио ({filename}) с моделью large-v3...")
+        print(f"--> [1/3] Загрузка и распознавание аудио ({filename}) моделью {model_name}...")
         audio = whisperx.load_audio(temp_audio_path)
         
         # 1. Распознавание речи
         t_load = time.time()
         whisper_model = whisperx.load_model(
-            "large-v3",
+            model_name,
             device=device,
             compute_type=compute_type,
             language=language if language != "auto" else None,
@@ -229,6 +231,7 @@ def main(
     language: str = "ru",
     speakers: int = None,
     output: str = None,
+    model: str = "large-v3",
 ):
     path = Path(file).expanduser().resolve()
     if not path.exists():
@@ -238,6 +241,7 @@ def main(
     print(f"\n🚀 Отправка аудио в облачный GPU (Modal A10G): {path.name}")
     print(f"   Размер: {path.stat().st_size / (1024 * 1024):.1f} МБ")
     print(f"   Язык: {language}")
+    print(f"   Модель: {model}")
     if speakers:
         print(f"   Количество спикеров: {speakers}")
 
@@ -249,9 +253,25 @@ def main(
         filename=path.name,
         language=language,
         num_speakers=speakers,
+        model_name=model,
     )
 
-    out_path = Path(output) if output else path.with_name(f"{path.stem}_транскрибация.txt")
+    if output:
+        out_path = Path(output).expanduser()
+    else:
+        # Дата и время прогона в имени: повторная транскрибация того же аудио
+        # больше не затирает предыдущий результат молча.
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+        out_path = path.with_name(f"{path.stem}_транскрибация_{model}_{stamp}.txt")
+
+    # Страховка на случай двух прогонов в одну минуту или явного --output.
+    if out_path.exists():
+        base, suffix = out_path.with_suffix(""), out_path.suffix
+        n = 2
+        while out_path.exists():
+            out_path = base.with_name(f"{base.name}_{n}{suffix}")
+            n += 1
+
     out_path.write_text(formatted_text, encoding="utf-8")
 
     print("\n" + "="*50)
