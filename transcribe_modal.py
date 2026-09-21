@@ -82,12 +82,19 @@ def process_audio(
 
         # 3. Диаризация (разделение по голосам)
         print("--> [3/3] Определение спикеров нейросетью Pyannote...")
+        from whisperx.diarize import DiarizationPipeline
         try:
-            from whisperx.diarize import DiarizationPipeline
-            diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
-        except Exception:
-            from whisperx.diarize import DiarizationPipeline
-            diarize_model = DiarizationPipeline(token=hf_token, device=device)
+            diarize_model = DiarizationPipeline(
+                model_name="pyannote/speaker-diarization-3.1",
+                use_auth_token=hf_token,
+                device=device,
+            )
+        except TypeError:
+            diarize_model = DiarizationPipeline(
+                model_name="pyannote/speaker-diarization-3.1",
+                token=hf_token,
+                device=device,
+            )
         
         if num_speakers:
             min_spk = num_speakers
