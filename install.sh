@@ -78,13 +78,26 @@ cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
 </plist>
 EOF
 
+# Без exec: процесс, запущенный LaunchServices, должен остаться живым,
+# иначе TCC читает подпись у подменённого образа (python) вместо бандла.
 cat << 'EOF' > "$APP_DIR/Contents/MacOS/AI Transcriber"
 #!/bin/bash
 export PATH="$HOME/.local/bin:$PATH"
-exec "$HOME/.modal-venv/bin/python" "$HOME/.local/bin/transcribe_gui.py"
+"$HOME/.modal-venv/bin/python" "$HOME/.local/bin/transcribe_gui.py"
 EOF
 
 chmod +x "$APP_DIR/Contents/MacOS/AI Transcriber"
+
+# Ad-hoc подпись интерпретатора: uv ставит python без подписи вообще
+# ("code object is not signed at all"), поэтому macOS не может привязать
+# к нему разрешения и отказывает в доступе к Рабочему столу, Документам
+# и Загрузкам с ошибкой PermissionError(1, 'Operation not permitted').
+BASE_PYTHON="$("$VENV_DIR/bin/python" -c 'import sys; print(sys._base_executable or sys.executable)')"
+if [ -n "$BASE_PYTHON" ] && [ -f "$BASE_PYTHON" ]; then
+    echo "Подпись интерпретатора $BASE_PYTHON..."
+    codesign --force --sign - "$BASE_PYTHON" 2>/dev/null || \
+        echo "  Предупреждение: подписать интерпретатор не удалось."
+fi
 
 # Ad-hoc цифровая подпись бандла (для авторизации в macOS TCC)
 echo "Цифровая подпись бандла macOS (codesign)..."
