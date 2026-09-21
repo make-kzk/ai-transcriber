@@ -62,7 +62,21 @@ def process_audio(
 ):
     import time
     import inspect
+    import logging
     import tempfile
+    import warnings
+
+    # Три предупреждения появляются на каждом прогоне и ничего не значат:
+    # чекпоинт VAD идёт из самого пакета whisperx, формат Lightning
+    # обновляется только в памяти, а TF32 pyannote выключает намеренно ради
+    # воспроизводимости диаризации. В красном шуме тонут настоящие ошибки.
+    # Гасим адресно — остальные предупреждения по-прежнему видны.
+    warnings.filterwarnings("ignore", message=r"You are using `torch\.load` with `weights_only=False`")
+    warnings.filterwarnings("ignore", message=r"Lightning automatically upgraded your loaded checkpoint")
+    warnings.filterwarnings("ignore", message=r"TensorFloat-32 \(TF32\) has been disabled")
+    # То же сообщение Lightning печатает и через логгер, мимо warnings.
+    logging.getLogger("pytorch_lightning.utilities.migration.utils").setLevel(logging.ERROR)
+
     import torch
     import whisperx
     from whisperx.diarize import DiarizationPipeline
