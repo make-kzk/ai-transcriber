@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 from datetime import datetime
 from pathlib import Path
 import modal
@@ -187,6 +188,16 @@ def process_audio(
         except Exception:
             pass
 
+        # Пословные таймкоды: в расшифровке время есть только на границах
+        # реплик, а паузы и запинки живут внутри них.
+        words_data = [
+            {"text": w.get("word", ""), "start": w.get("start"),
+             "end": w.get("end"), "speaker": w.get("speaker") or seg.get("speaker")}
+            for seg in result.get("segments", [])
+            for w in (seg.get("words") or [])
+            if w.get("start") is not None
+        ]
+
         # Форматирование читаемого диалога
         output_lines = []
         current_speaker = None
@@ -229,7 +240,7 @@ def process_audio(
             print(f"      {stage}: {sec:.0f} с ({sec / total * 100:.0f}%)")
         print(f"      Итого в контейнере: {total:.0f} с")
 
-        return formatted_text
+        return formatted_text, words_data
 
     finally:
         if temp_audio_path and os.path.exists(temp_audio_path):
@@ -262,7 +273,7 @@ def main(
     with open(path, "rb") as f:
         audio_bytes = f.read()
 
-    formatted_text = process_audio.remote(
+    formatted_text, words_data = process_audio.remote(
         audio_bytes=audio_bytes,
         filename=path.name,
         language=language,
@@ -288,10 +299,16 @@ def main(
 
     out_path.write_text(formatted_text, encoding="utf-8")
 
+    words_path = out_path.with_name(out_path.stem + "_слова.json")
+    words_path.write_text(
+        json.dumps(words_data, ensure_ascii=False), encoding="utf-8"
+    )
+
     print("\n" + "="*50)
     print("✅ ТРАНСКРИБАЦИЯ УСПЕШНО ЗАВЕРШЕНА!")
     print("="*50)
-    print(f"📄 Результат сохранен в: {out_path}\n")
+    print(f"📄 Результат сохранен в: {out_path}")
+    print(f"🕐 Пословные таймкоды: {words_path.name}\n")
     print("--- Первые реплики диалога ---")
     preview_lines = formatted_text.splitlines()[:15]
     print("\n".join(preview_lines))

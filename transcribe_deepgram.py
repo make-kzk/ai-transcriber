@@ -122,6 +122,7 @@ def main():
     print(f"✅ Распознано слов: {len(words)}, голосов: {len(speaker_of)}"
           + (f", длительность: {tu.mmss(duration)}" if duration else ""))
     print(f"📄 Расшифровка Deepgram: {base.name}")
+    print(f"🕐 Пословные таймкоды: {tu.save_words(words, base).name}")
 
     if args.reference:
         if not args.reference.exists():

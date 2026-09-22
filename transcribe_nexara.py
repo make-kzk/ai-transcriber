@@ -121,6 +121,7 @@ def main():
 
     print(f"✅ Фрагментов: {len(words)} ({granularity}), голосов: {len(speaker_of)}")
     print(f"📄 Расшифровка Nexara: {base.name}")
+    print(f"🕐 Пословные таймкоды: {tu.save_words(words, base).name}")
 
     if args.reference:
         if not args.reference.exists():

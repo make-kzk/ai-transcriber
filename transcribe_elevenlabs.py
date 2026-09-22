@@ -104,6 +104,7 @@ def main():
     base = args.audio.with_name(f"{args.audio.stem}_elevenlabs_{stamp}.txt")
     base.write_text(tu.native_transcript(words, speaker_of), encoding="utf-8")
     print(f"📄 Расшифровка ElevenLabs: {base.name}")
+    print(f"🕐 Пословные таймкоды: {tu.save_words(words, base).name}")
 
     if args.reference:
         if not args.reference.exists():

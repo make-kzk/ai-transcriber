@@ -4,6 +4,7 @@
 привести к нашей разметке `[MM:SS - MM:SS] SPEAKER_XX:`, разложить по репликам
 эталонной расшифровки и свести. Здесь живёт эта общая часть.
 """
+import json
 import re
 import sys
 from pathlib import Path
@@ -67,6 +68,21 @@ def parse_reference(path: Path):
                 "end": int(m.group(3)) * 60 + int(m.group(4)),
             })
     return segs
+
+
+def save_words(words, transcript_path: Path) -> Path:
+    """Пословные таймкоды рядом с расшифровкой.
+
+    Нужны для пауз и запинок внутри реплики: в самой расшифровке время
+    указано только на границах реплик, а внутри неё всё склеено.
+    """
+    out = transcript_path.with_name(transcript_path.stem + "_слова.json")
+    out.write_text(
+        json.dumps([{k: w.get(k) for k in ("text", "start", "end", "speaker")}
+                    for w in words], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return out
 
 
 def parse_transcript(path: Path):

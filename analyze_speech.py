@@ -10,6 +10,7 @@
 какая система её сделала.
 """
 import argparse
+import json
 import re
 import statistics as st
 import sys
@@ -34,6 +35,61 @@ def count_parasites(words) -> int:
     n = sum(1 for w in words if w in PARASITES)
     n += sum(1 for a, b in zip(words, words[1:]) if (a, b) in PARASITE_PAIRS)
     return n
+
+
+# Запинки видны только там, где система их сохраняет. Whisper причёсывает
+# речь и выбрасывает «э-э» и обрывы слов, ElevenLabs и Deepgram оставляют.
+# Поэтому счёт запинок осмысленно сравнивать лишь внутри одной системы.
+# Только то, что не является нормальным словом: тянущийся гласный, «м»,
+# или слог через дефис. Набор букв без этого условия ловил «а», «у», «на»,
+# «ну» — и давал у Whisper сотню несуществующих запинок.
+HESITATION_RE = re.compile(
+    r"^(э+|э?м+|а{2,}|у{2,}|о{2,}|ы+)$"      # э, ээ, эм, мм, ааа, ууу
+    r"|^[аэоуым]([-–][аэоуым]+)+$"           # а-а, э-э-э, м-м
+)
+FRAGMENT_RE = re.compile(r"[-–]{1,2}$")                            # оцен--, кон-
+
+
+def classify_hesitation(prev_word: str, word: str) -> str | None:
+    """Тип запинки или None. Только по форме слова, без догадок о причинах."""
+    bare = word.strip().lower().replace("ё", "е")
+    clean = re.sub(r"[^0-9a-zа-я-]", "", bare)
+    if not clean:
+        return None
+    if FRAGMENT_RE.search(clean):
+        return "обрыв слова"
+    if HESITATION_RE.match(clean):
+        return "заполненная пауза"
+    if prev_word and re.sub(r"[^0-9a-zа-я]", "", prev_word.lower()) == \
+            re.sub(r"[^0-9a-zа-я]", "", bare) and len(clean) > 1:
+        return "повтор слова"
+    return None
+
+
+def analyze_words(path: Path, names):
+    """Паузы и запинки внутри реплик — по пословным таймкодам."""
+    words = json.loads(path.read_text(encoding="utf-8"))
+    per = {}
+    prev, prev_text = None, ""
+    for w in words:
+        if w.get("start") is None or w.get("end") is None:
+            continue
+        spk = names.get(w.get("speaker"), w.get("speaker") or "—")
+        p = per.setdefault(spk, {"pauses": [], "hesitations": {}, "words": 0})
+        p["words"] += 1
+        # В ранних выгрузках поле называлось word — принимаем оба варианта.
+        text = w.get("text") or w.get("word") or ""
+        kind = classify_hesitation(prev_text, text)
+        if kind:
+            p["hesitations"][kind] = p["hesitations"].get(kind, 0) + 1
+        # Промежуток считаем только внутри речи одного человека: пауза
+        # между репликами разных людей — это смена говорящего, а не заминка.
+        if prev is not None and prev.get("speaker") == w.get("speaker"):
+            gap = w["start"] - prev["end"]
+            if 0 < gap < 30:
+                p["pauses"].append(gap)
+        prev, prev_text = w, text
+    return per
 
 
 def mmss(seconds: float) -> str:
@@ -88,6 +144,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("transcript", type=Path)
     ap.add_argument("--names", help="имена вместо SPEAKER_00, через запятую")
+    ap.add_argument("--words", type=Path,
+                    help="файл с пословными таймкодами (по умолчанию ищется рядом)")
     ap.add_argument("-o", "--output", type=Path, help="сохранить отчёт в файл")
     args = ap.parse_args()
 
@@ -133,6 +191,38 @@ def main():
             add(f"   Вступал поверх собеседника: {overlaps[spk]} раз")
         add("")
 
+    words_file = args.words or args.transcript.with_name(
+        args.transcript.stem + "_слова.json")
+    if words_file.exists():
+        inner = analyze_words(words_file, names)
+        add("── Внутри реплик")
+        for spk, d in sorted(inner.items(), key=lambda kv: -kv[1]["words"]):
+            if not d["words"]:
+                continue
+            long_p = [g for g in d["pauses"] if g >= 0.5]
+            very = [g for g in d["pauses"] if g >= 1.5]
+            add(f"   {spk}:")
+            add(f"      Пауз дольше 0,5 с: {len(long_p)}"
+                + (f" (из них дольше 1,5 с: {len(very)})" if very else "")
+                + (f", самая длинная {max(d['pauses']):.1f} с" if d["pauses"] else ""))
+            if d["pauses"]:
+                add(f"      На 100 слов приходится пауз: "
+                    f"{len(long_p) / d['words'] * 100:.1f}")
+            total_h = sum(d["hesitations"].values())
+            if total_h:
+                parts = ", ".join(f"{k} — {v}" for k, v in
+                                  sorted(d["hesitations"].items(), key=lambda kv: -kv[1]))
+                add(f"      Запинок: {total_h} ({parts})")
+                add(f"      На 100 слов: {total_h / d['words'] * 100:.1f}")
+            else:
+                add("      Запинок не найдено — возможно, система их вычищает.")
+        add("")
+    else:
+        add("── Внутри реплик")
+        add(f"   Нет файла {words_file.name} — паузы и запинки внутри реплик")
+        add("   без пословных таймкодов не считаются.")
+        add("")
+
     add("── Паузы между репликами")
     if pauses:
         long = [g for g in pauses if g >= 2]
@@ -143,9 +233,11 @@ def main():
     else:
         add("   Смен говорящего не зафиксировано.")
     add("")
-    add("Метрики объективны, но зависят от точности таймкодов: они")
-    add("округлены до секунды, поэтому темп на коротких репликах не")
-    add("считается, а паузы короче секунды неразличимы.")
+    add("Метрики объективны, но зависят от данных. Время реплик округлено")
+    add("до секунды: темп на коротких репликах не считается. Запинки видны")
+    add("только там, где система их сохраняет — Whisper причёсывает речь,")
+    add("ElevenLabs и Deepgram оставляют, поэтому сравнивать их счёт между")
+    add("системами бессмысленно.")
     add("=" * 62)
 
     report = "\n".join(out)
