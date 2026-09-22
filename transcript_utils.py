@@ -69,6 +69,27 @@ def parse_reference(path: Path):
     return segs
 
 
+def parse_transcript(path: Path):
+    """Реплики с временем, говорящим и текстом — для разбора, а не для сверки."""
+    segs, cur = [], None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = SEG_RE.match(line.strip())
+        if m:
+            cur = {
+                "start": int(m.group(1)) * 60 + int(m.group(2)),
+                "end": int(m.group(3)) * 60 + int(m.group(4)),
+                "speaker": m.group(5),
+                "lines": [],
+            }
+            segs.append(cur)
+        elif line.strip() and cur is not None:
+            cur["lines"].append(line.strip())
+    for seg in segs:
+        seg["text"] = " ".join(seg["lines"])
+        del seg["lines"]
+    return segs
+
+
 def fitted_transcript(words, reference) -> str:
     """Раскладывает слова по репликам эталона.
 
