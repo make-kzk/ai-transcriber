@@ -245,6 +245,9 @@ speech_analysis/          самостоятельный модуль разбо
 transcribe_gui.py         приложение
 transcribe                команда для терминала
 install.sh                установка и сборка .app
+
+measurements/             скрипты, которыми получены цифры из README
+tests/                    тесты на правила разметки и разбора
 ```
 
 ---
