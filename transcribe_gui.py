@@ -7,6 +7,8 @@ import subprocess
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+import speech_analysis
+from speech_analysis import config as sa_config
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -76,7 +78,19 @@ class TranscribeApp:
         style.configure("Timer.TLabel", background="#FFFFFF", font=("Menlo", 12, "bold"), foreground="#515154")
 
     def _build_ui(self):
-        main_container = ttk.Frame(self.root, padding=20)
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tab_transcribe = ttk.Frame(notebook)
+        tab_analysis = ttk.Frame(notebook)
+        notebook.add(tab_transcribe, text="  Транскрибация  ")
+        notebook.add(tab_analysis, text="  Анализ речи  ")
+
+        self._build_transcribe_tab(tab_transcribe)
+        self._build_analysis_tab(tab_analysis)
+
+    def _build_transcribe_tab(self, parent):
+        main_container = ttk.Frame(parent, padding=20)
         main_container.pack(fill="both", expand=True)
 
         # 1. Заголовок
@@ -236,6 +250,137 @@ class TranscribeApp:
 
         self.btn_open_dir = ttk.Button(self.action_frame, text="📂 Показать в Finder", command=self.open_result_dir, state="disabled")
         self.btn_open_dir.pack(side="left")
+
+    # ─────────────────────────── Анализ речи ───────────────────────────
+    # Модуль speech_analysis самостоятелен: он знает только формат файла
+    # расшифровки и дорабатывается отдельно от системы транскрибации.
+
+    def _build_analysis_tab(self, parent):
+        box = ttk.Frame(parent, padding=20)
+        box.pack(fill="both", expand=True)
+
+        ttk.Label(box, text="⚙️ Настройки разбора речи", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(box, style="SubHeader.TLabel",
+                  text="Считаются только измеримые величины: темп, паузы, запинки,\n"
+                       "баланс времени. Оценок вроде «уверенно» здесь нет намеренно.").pack(
+            anchor="w", pady=(2, 12))
+
+        cfg = sa_config.load()
+        self.an_vars = {}
+
+        nums = ttk.Frame(box, style="Card.TFrame", padding=12)
+        nums.pack(fill="x", pady=(0, 10))
+        for i, (key, label, hint) in enumerate([
+            ("pause_short", "Заметная пауза, с", "короче — не считаем за паузу"),
+            ("pause_long", "Долгая пауза, с", "выделяется отдельно как заминка"),
+            ("min_turn_for_rate", "Мин. реплика для темпа, с",
+             "на коротких округление времени искажает темп"),
+        ]):
+            ttk.Label(nums, text=label, style="Card.TLabel").grid(row=i, column=0, sticky="w", pady=3)
+            var = tk.StringVar(value=str(cfg[key]))
+            self.an_vars[key] = var
+            ttk.Entry(nums, textvariable=var, width=8).grid(row=i, column=1, padx=(12, 12))
+            ttk.Label(nums, text=hint, style="Card.TLabel", foreground="#86868B",
+                      font=("SF Pro Text", 10)).grid(row=i, column=2, sticky="w")
+
+        blocks = ttk.Frame(box, style="Card.TFrame", padding=12)
+        blocks.pack(fill="x", pady=(0, 10))
+        ttk.Label(blocks, text="Показывать в отчёте:", style="Card.TLabel",
+                  font=("SF Pro Text", 12, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        self.an_show = {}
+        for i, (key, label) in enumerate([
+            ("balance", "баланс времени"), ("rate", "темп речи"),
+            ("parasites", "слова-паразиты"), ("questions", "вопросы"),
+            ("transitions", "паузы между репликами"), ("inner", "паузы и запинки внутри"),
+        ]):
+            var = tk.BooleanVar(value=cfg["show"].get(key, True))
+            self.an_show[key] = var
+            ttk.Checkbutton(blocks, text=label, variable=var, style="Card.TCheckbutton").grid(
+                row=1 + i // 3, column=i % 3, sticky="w", padx=(0, 18), pady=2)
+
+        words_box = ttk.Frame(box, style="Card.TFrame", padding=12)
+        words_box.pack(fill="both", expand=True, pady=(0, 10))
+        ttk.Label(words_box, text="Слова-паразиты — по одному в строке:",
+                  style="Card.TLabel", font=("SF Pro Text", 12, "bold")).pack(anchor="w")
+        ttk.Label(words_box, style="Card.TLabel", foreground="#86868B",
+                  font=("SF Pro Text", 10),
+                  text="Служебные слова «и», «а», «как», «то» сюда добавлять не стоит:\n"
+                       "их частота говорит о языке, а не о качестве речи.").pack(anchor="w", pady=(0, 6))
+        self.an_parasites = tk.Text(words_box, height=6, font=("Menlo", 11),
+                                    relief="solid", borderwidth=1)
+        self.an_parasites.pack(fill="both", expand=True)
+        self.an_parasites.insert("1.0", "\n".join(cfg["parasites"]))
+
+        btns = ttk.Frame(box)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Сохранить настройки", command=self._save_analysis_config).pack(side="left")
+        ttk.Button(btns, text="Сбросить", command=self._reset_analysis_config).pack(side="left", padx=8)
+        ttk.Button(btns, text="📊 Разобрать расшифровку...",
+                   command=self.run_analysis).pack(side="right")
+
+        self.an_status = ttk.Label(box, text=f"Настройки: {sa_config.CONFIG_PATH}",
+                                   style="SubHeader.TLabel")
+        self.an_status.pack(anchor="w", pady=(10, 0))
+
+    def _collect_analysis_config(self):
+        cfg = sa_config.load()
+        for key, var in self.an_vars.items():
+            try:
+                cfg[key] = float(var.get().replace(",", "."))
+            except ValueError:
+                raise ValueError(f"«{var.get()}» — не число")
+        cfg["show"] = {k: v.get() for k, v in self.an_show.items()}
+        cfg["parasites"] = [w.strip().lower() for w in
+                            self.an_parasites.get("1.0", "end").splitlines() if w.strip()]
+        return cfg
+
+    def _save_analysis_config(self):
+        try:
+            path = sa_config.save(self._collect_analysis_config())
+        except ValueError as e:
+            messagebox.showerror("Не сохранено", str(e), parent=self.root)
+            return
+        self.an_status.config(text=f"Сохранено: {path}")
+
+    def _reset_analysis_config(self):
+        if not messagebox.askokcancel("Сбросить настройки",
+                                      "Вернуть значения по умолчанию?", parent=self.root):
+            return
+        if sa_config.CONFIG_PATH.exists():
+            sa_config.CONFIG_PATH.unlink()
+        defaults = sa_config.load()
+        for key, var in self.an_vars.items():
+            var.set(str(defaults[key]))
+        for key, var in self.an_show.items():
+            var.set(defaults["show"].get(key, True))
+        self.an_parasites.delete("1.0", "end")
+        self.an_parasites.insert("1.0", "\n".join(defaults["parasites"]))
+        self.an_status.config(text="Восстановлены значения по умолчанию")
+
+    def run_analysis(self):
+        path = filedialog.askopenfilename(
+            title="Выберите расшифровку",
+            filetypes=[("Расшифровка", "*.txt"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            cfg = self._collect_analysis_config()
+            _, text = speech_analysis.analyze(Path(path), cfg=cfg)
+        except Exception as e:
+            messagebox.showerror("Не удалось разобрать", str(e), parent=self.root)
+            return
+
+        out = Path(path).with_name(Path(path).stem + "_метрики.txt")
+        out.write_text(text + "\n", encoding="utf-8")
+        self.an_status.config(text=f"Отчёт: {out.name}")
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Метрики: {Path(path).name}")
+        win.geometry("720x600")
+        area = tk.Text(win, font=("Menlo", 11), wrap="none")
+        area.pack(fill="both", expand=True, padx=10, pady=10)
+        area.insert("1.0", text)
+        area.config(state="disabled")
 
     def choose_file(self):
         filetypes = [
