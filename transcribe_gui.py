@@ -152,6 +152,7 @@ class TranscribeApp:
         # основой сводного документа, остальные идут в сверку.
         self.system_vars = {}
         for i, (key, label, note, default) in enumerate([
+            ("gemini", "Gemini 3.5 Transcribe", "подсказка словаря терминов", True),
             ("elevenlabs", "ElevenLabs Scribe", "точнее на терминах, 13¢", True),
             ("whisper-v3", "Whisper large-v3", "в пределах лимита Modal", True),
             ("whisper-turbo", "Whisper large-v3-turbo", "быстрее, менее точен", False),

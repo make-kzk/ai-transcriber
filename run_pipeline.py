@@ -21,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 
 # Порядок важен: он задаёт, кто станет основой документа.
 SYSTEMS = {
+    "gemini": {"label": "Gemini 3.5 Transcribe", "kind": "external"},
     "elevenlabs": {"label": "ElevenLabs Scribe", "kind": "external"},
     "whisper-v3": {"label": "Whisper large-v3", "kind": "whisper", "model": "large-v3"},
     "whisper-turbo": {"label": "Whisper large-v3-turbo", "kind": "whisper",
@@ -99,9 +100,12 @@ def main():
         if SYSTEMS[key]["kind"] != "external":
             continue
         step(SYSTEMS[key]["label"])
-        cmd = [python, str(HERE / f"transcribe_{key}.py"), str(args.audio),
-               "--language", "rus" if args.language == "ru" else args.language]
-        if args.speakers:
+        cmd = [python, str(HERE / f"transcribe_{key}.py"), str(args.audio)]
+        # Коды языка у сервисов разные: ISO-639-3 у ElevenLabs, BCP-47 у Gemini.
+        lang = {"gemini": {"ru": "ru-RU", "en": "en-US"},
+                }.get(key, {"ru": "rus", "en": "eng"}).get(args.language, args.language)
+        cmd += ["--language", lang]
+        if args.speakers and key != "gemini":
             cmd += ["--speakers", str(args.speakers)]
         if reference:
             cmd += ["--reference", str(reference)]
