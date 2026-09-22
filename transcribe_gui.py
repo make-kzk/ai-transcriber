@@ -121,36 +121,43 @@ class TranscribeApp:
         self.lang_combo = ttk.Combobox(opts_grid, textvariable=self.lang_var, values=["Русский (ru)", "Английский (en)", "Автоопределение"], width=15, state="readonly")
         self.lang_combo.grid(row=0, column=3, sticky="w", pady=3)
 
-        ttk.Label(opts_grid, text="Модель:", style="Card.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        self.model_var = tk.StringVar(value="large-v3 (точнее)")
-        self.model_combo = ttk.Combobox(
-            opts_grid,
-            textvariable=self.model_var,
-            values=["large-v3 (точнее)", "large-v2 (прежняя)"],
-            width=15,
-            state="readonly",
-        )
-        self.model_combo.grid(row=1, column=1, sticky="w", padx=(0, 25), pady=3)
 
-        self.verify_var = tk.BooleanVar(value=False)
-        self.chk_verify = ttk.Checkbutton(
-            opts_grid,
-            text="Сверить с ElevenLabs",
-            variable=self.verify_var,
-            style="Card.TCheckbutton",
-        )
-        self.chk_verify.grid(row=1, column=2, columnspan=2, sticky="w", pady=3)
+        # 4. Карточка выбора систем
+        sys_card = ttk.Frame(main_container, style="Card.TFrame", padding=12)
+        sys_card.pack(fill="x", pady=(0, 12))
+
+        ttk.Label(sys_card, text="Распознать системами:", style="Card.TLabel",
+                  font=("SF Pro Text", 12, "bold")).pack(anchor="w", pady=(0, 6))
+
+        sys_grid = ttk.Frame(sys_card, style="Card.TFrame")
+        sys_grid.pack(fill="x")
+
+        # Порядок тот же, что в run_pipeline.py: первая отмеченная становится
+        # основой сводного документа, остальные идут в сверку.
+        self.system_vars = {}
+        for i, (key, label, note, default) in enumerate([
+            ("elevenlabs", "ElevenLabs Scribe", "точнее на терминах, 13¢", True),
+            ("whisper-v3", "Whisper large-v3", "в пределах лимита Modal", True),
+            ("whisper-turbo", "Whisper large-v3-turbo", "быстрее, менее точен", False),
+            ("whisper-v2", "Whisper large-v2", "прежняя версия", False),
+        ]):
+            var = tk.BooleanVar(value=default)
+            self.system_vars[key] = var
+            ttk.Checkbutton(sys_grid, text=label, variable=var,
+                            style="Card.TCheckbutton").grid(
+                row=i, column=0, sticky="w", pady=2)
+            ttk.Label(sys_grid, text=note, style="Card.TLabel",
+                      foreground="#86868B", font=("SF Pro Text", 10)).grid(
+                row=i, column=1, sticky="w", padx=(14, 0))
 
         ttk.Label(
-            opts_grid,
-            text="Сверка — независимая система распознавания: помечает места,\n"
-                 "где две модели разошлись по смыслу. Нужен ключ ElevenLabs.",
-            style="Card.TLabel",
-            foreground="#86868B",
-            font=("SF Pro Text", 10),
-        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+            sys_card,
+            text="Отмеченные системы распознают запись независимо. Если их больше одной,\n"
+                 "тексты сводятся и места расхождений помечаются — первая по списку идёт в основу.",
+            style="Card.TLabel", foreground="#86868B", font=("SF Pro Text", 10),
+        ).pack(anchor="w", pady=(8, 0))
 
-        # 4. Панель кнопок: СТАРТ и ОТМЕНА
+        # 5. Панель кнопок: СТАРТ
         btn_box = ttk.Frame(main_container)
         btn_box.pack(fill="x", pady=(0, 12))
 
@@ -269,19 +276,23 @@ class TranscribeApp:
             self.lbl_status.config(text="⚡️ Инициализация облачного GPU...", foreground="#FF9500")
 
     def start_transcription(self):
-        """Запускает транскрибацию в Терминале.
+        """Запускает распознавание в Терминале.
 
         modal отдаёт вывод пачками, когда пишет не в TTY, поэтому встроенный
-        журнал наполнялся рывками и не показывал ход работы. В настоящем
-        терминале вывод живой без ухищрений — окно берёт на себя только
-        выбор файла и параметров.
+        журнал не показывал ход работы. В настоящем терминале вывод живой —
+        окно берёт на себя только выбор файла и систем.
         """
         if not self.selected_file:
             return
 
-        spk_val = self.spk_var.get()
-        speakers_arg = ["--speakers", spk_val] if spk_val.isdigit() else []
+        systems = [k for k, v in self.system_vars.items() if v.get()]
+        if not systems:
+            messagebox.showwarning("Не выбрана система",
+                                   "Отметьте хотя бы одну систему распознавания.",
+                                   parent=self.root)
+            return
 
+        spk_val = self.spk_var.get()
         lang_val = self.lang_var.get()
         if "ru" in lang_val:
             lang_code = "ru"
@@ -290,34 +301,17 @@ class TranscribeApp:
         else:
             lang_code = "auto"
 
-        model_code = self.model_var.get().split()[0]
+        cmd = [VENV_PYTHON, str(Path(SCRIPT_PATH).resolve().parent / "run_pipeline.py"),
+               str(self.selected_file), "--language", lang_code, "--systems"] + systems
+        if spk_val.isdigit():
+            cmd += ["--speakers", spk_val]
 
-        # Имя задаём сами: следующим шагам цепочки нужен известный путь,
-        # а иначе его придумывает transcribe_modal.py уже внутри прогона.
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        result = self.selected_file.with_name(
-            f"{self.selected_file.stem}_транскрибация_{model_code}_{stamp}.txt")
-
-        cmd = [MODAL_BIN, "run", SCRIPT_PATH,
-               "--file", str(self.selected_file),
-               "--language", lang_code,
-               "--model", model_code,
-               "--output", str(result)] + speakers_arg
-
-        verify_cmd = None
-        if self.verify_var.get():
-            el_script = str(Path(SCRIPT_PATH).resolve().parent / "transcribe_elevenlabs.py")
-            verify_cmd = [VENV_PYTHON, el_script, str(self.selected_file),
-                          "--reference", str(result), "--compare"]
-            if spk_val.isdigit():
-                verify_cmd += ["--speakers", spk_val]
-
-
         log_path = LOG_DIR / f"{self.selected_file.stem}_{stamp}.log"
 
         try:
             LOG_DIR.mkdir(parents=True, exist_ok=True)
-            launcher = self._write_terminal_script(cmd, verify_cmd, log_path)
+            launcher = self._write_terminal_script(cmd, log_path)
             subprocess.run(["open", "-a", "Terminal", str(launcher)], check=True)
         except Exception as e:
             self.lbl_status.config(text="❌ Не удалось открыть Терминал", foreground="#FF3B30")
@@ -328,73 +322,49 @@ class TranscribeApp:
         self.lbl_status.config(text="▶️ Запущено в Терминале", foreground="#34C759")
         self._log_msg("\n" + "=" * 50)
         self._log_msg(f"Запущено в Терминале: {self.selected_file.name}")
-        self._log_msg(f"Параметры: Язык = {lang_code}, Спикеры = {spk_val}, Модель = {model_code}")
-        if verify_cmd:
-            self._log_msg("Сверка с ElevenLabs включена — запустится после распознавания.")
+        self._log_msg(f"Язык: {lang_code}, спикеры: {spk_val}")
+        self._log_msg(f"Систем выбрано: {len(systems)} — {', '.join(systems)}")
+        if len(systems) > 1:
+            self._log_msg("Тексты будут сведены, расхождения помечены.")
         self._log_msg("Ход работы смотрите в открывшемся окне Терминала.")
-        self._log_msg(f"Результат: {result.name}")
         self._log_msg(f"Журнал прогона: {log_path}")
         self._log_msg("=" * 50)
 
-        # Результат появится, когда отработает Терминал; кнопки проверяют наличие файла.
         self.btn_open_file.config(state="normal")
         self.btn_open_dir.config(state="normal")
 
-    def _write_terminal_script(self, cmd, verify_cmd=None, log_path=None):
+    def _write_terminal_script(self, cmd, log_path=None):
         """Готовит .command-файл — так Терминал открывается без доступа к автоматизации."""
-        quoted = " ".join(shlex.quote(part) for part in cmd)
-
         lines = [
             "#!/bin/bash",
             # Терминал запускает .command не как login-оболочку, поэтому профиль
-            # приходится подключать вручную — иначе не видно ELEVENLABS_API_KEY.
+            # приходится подключать вручную — иначе не видно ключей внешних систем.
             '[ -f "$HOME/.bash_profile" ] && . "$HOME/.bash_profile"',
             '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"',
         ]
-
         if log_path:
             # tee, а не перенаправление: вывод должен и сохраниться, и остаться
             # видимым в Терминале — ради него мы от встроенного журнала и ушли.
             lines.append(f"exec > >(tee {shlex.quote(str(log_path))}) 2>&1")
 
         lines += [
-            'echo ' + shlex.quote(f'Файл: {self.selected_file.name}'),
+            "echo " + shlex.quote(f"Файл: {self.selected_file.name}"),
             "echo",
-            quoted,
+            " ".join(shlex.quote(str(part)) for part in cmd),
             "status=$?",
             "echo",
-        ]
-
-        if verify_cmd:
-            verify_quoted = " ".join(shlex.quote(part) for part in verify_cmd)
-            lines += [
-                "if [ $status -eq 0 ]; then",
-                '  if [ -z "$ELEVENLABS_API_KEY" ]; then',
-                "    echo '⚠️  Сверка пропущена: не задан ELEVENLABS_API_KEY.'",
-                "    echo '    Добавьте ключ в ~/.bash_profile и откройте окно заново.'",
-                "  else",
-                "    echo '--- Сверка с независимой системой (ElevenLabs) ---'",
-                f"    {verify_quoted}",
-                "    status=$?",
-                "  fi",
-                "fi",
-                "echo",
-            ]
-
-        lines += [
             "if [ $status -eq 0 ]; then echo '✅ Готово.'; "
             'else echo "❌ Завершилось с кодом $status"; fi',
             "echo 'Окно можно закрыть.'",
             'rm -f -- "$0"',
         ]
 
-        script = "\n".join(lines) + "\n"
         # Уникальное имя: при параллельных запусках общий файл успевал
         # перезаписаться до того, как Терминал его прочитает, и оба окна
-        # уходили транскрибировать одно и то же.
+        # уходили распознавать одно и то же.
         fd, name = tempfile.mkstemp(prefix="ai_transcriber_", suffix=".command")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(script)
+            f.write("\n".join(lines) + "\n")
         launcher = Path(name)
         launcher.chmod(0o755)
         return launcher
