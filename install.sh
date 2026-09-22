@@ -19,7 +19,8 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 # praat-parselmouth — измерение тона и громкости в модуле анализа речи.
 # Praat, а не самодельная обработка сигнала; один пакет без тяжёлых зависимостей.
-uv pip install --python "$VENV_DIR/bin/python" modal numpy httpx praat-parselmouth
+# anthropic — разбор по брифу на вкладке анализа (нужен свой ключ).
+uv pip install --python "$VENV_DIR/bin/python" modal numpy httpx praat-parselmouth anthropic
 
 # 3. Симлинки в ~/.local/bin (чтобы изменения в коде сразу работали везде)
 mkdir -p "$HOME/.local/bin"

@@ -8,7 +8,9 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 import speech_analysis
+from speech_analysis import brief as sa_brief
 from speech_analysis import config as sa_config
+from speech_analysis import llm as sa_llm
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -330,6 +332,64 @@ class TranscribeApp:
         ttk.Button(audio_box, text="Убрать", command=self._clear_analysis_audio).grid(
             row=2, column=2, sticky="w", padx=(10, 0))
 
+        brief_box = ttk.Frame(box, style="Card.TFrame", padding=12)
+        brief_box.pack(fill="x", pady=(0, 10))
+        ttk.Label(brief_box, text="Бриф: что разобрать", style="Card.TLabel",
+                  font=("SF Pro Text", 12, "bold")).grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(brief_box, style="Card.TLabel", foreground="#86868B",
+                  font=("SF Pro Text", 10),
+                  text="Метрики выше считаются бесплатно и всегда. Бриф — отдельный шаг:\n"
+                       "по нему модель пишет разбор для HR и нанимающего менеджера.").grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        ttk.Label(brief_box, text="Сценарий:", style="Card.TLabel").grid(row=2, column=0, sticky="w")
+        self.br_preset = tk.StringVar(value=sa_brief.PRESETS["interview"]["label"])
+        preset_box = ttk.Combobox(
+            brief_box, textvariable=self.br_preset, state="readonly", width=32,
+            values=[p["label"] for p in sa_brief.PRESETS.values()])
+        preset_box.grid(row=2, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=3)
+        preset_box.bind("<<ComboboxSelected>>", self._apply_preset)
+
+        ttk.Label(brief_box, text="Предмет:", style="Card.TLabel").grid(row=3, column=0, sticky="w")
+        self.br_subject = tk.StringVar()
+        ttk.Entry(brief_box, textvariable=self.br_subject, width=40).grid(
+            row=3, column=1, columnspan=3, sticky="we", padx=(8, 0), pady=3)
+
+        ttk.Label(brief_box, text="Кто есть кто:", style="Card.TLabel").grid(row=4, column=0, sticky="w")
+        self.br_role0 = tk.StringVar()
+        self.br_role1 = tk.StringVar()
+        ttk.Entry(brief_box, textvariable=self.br_role0, width=18).grid(row=4, column=1, sticky="w", padx=(8, 4))
+        ttk.Entry(brief_box, textvariable=self.br_role1, width=18).grid(row=4, column=2, sticky="w")
+        ttk.Label(brief_box, text="первый и второй голос", style="Card.TLabel",
+                  foreground="#86868B", font=("SF Pro Text", 10)).grid(row=4, column=3, sticky="w", padx=(8, 0))
+
+        focus_frame = ttk.Frame(brief_box, style="Card.TFrame")
+        focus_frame.grid(row=5, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(focus_frame, text="Разобрать:", style="Card.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        self.br_focus = {}
+        for i, (key, (label, _)) in enumerate(sa_brief.FOCUS_OPTIONS.items()):
+            var = tk.BooleanVar(value=False)
+            self.br_focus[key] = var
+            ttk.Checkbutton(focus_frame, text=label, variable=var,
+                            style="Card.TCheckbutton").grid(
+                row=1 + i // 2, column=i % 2, sticky="w", padx=(0, 20))
+
+        ttk.Label(brief_box, text="Дополнительно:", style="Card.TLabel").grid(
+            row=6, column=0, sticky="nw", pady=(8, 0))
+        self.br_extra = tk.Text(brief_box, height=3, font=("SF Pro Text", 11),
+                                relief="solid", borderwidth=1)
+        self.br_extra.grid(row=6, column=1, columnspan=3, sticky="we", padx=(8, 0), pady=(8, 0))
+        brief_box.columnconfigure(3, weight=1)
+
+        brief_btns = ttk.Frame(brief_box, style="Card.TFrame")
+        brief_btns.grid(row=7, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        ttk.Button(brief_btns, text="Показать бриф", command=self.preview_brief).pack(side="left")
+        ttk.Button(brief_btns, text="🧠 Разобрать по брифу...",
+                   command=self.run_brief).pack(side="left", padx=8)
+
+        self._apply_preset()
+
         btns = ttk.Frame(box)
         btns.pack(fill="x")
         ttk.Button(btns, text="Сохранить настройки", command=self._save_analysis_config).pack(side="left")
@@ -340,6 +400,93 @@ class TranscribeApp:
         self.an_status = ttk.Label(box, text=f"Настройки: {sa_config.CONFIG_PATH}",
                                    style="SubHeader.TLabel")
         self.an_status.pack(anchor="w", pady=(10, 0))
+
+    def _preset_key(self):
+        for key, p in sa_brief.PRESETS.items():
+            if p["label"] == self.br_preset.get():
+                return key
+        return "custom"
+
+    def _apply_preset(self, _event=None):
+        """Значения по умолчанию из сценария — их можно переписать вручную."""
+        preset = sa_brief.PRESETS[self._preset_key()]
+        self.br_role0.set(preset["roles"][0])
+        self.br_role1.set(preset["roles"][1])
+        for key, var in self.br_focus.items():
+            var.set(key in preset["focus"])
+
+    def _gather_brief(self, transcript: Path):
+        cfg = self._collect_analysis_config()
+        # Метрики считаем без подстановки имён: в расшифровке, которая уйдёт
+        # в модель, стоят SPEAKER_00/01, и обозначения должны совпадать.
+        # Кто есть кто — сказано отдельной строкой в брифе.
+        _, metrics_text = speech_analysis.analyze(
+            transcript, cfg=cfg, audio=self.an_audio)
+        roles = {"SPEAKER_00": self.br_role0.get(),
+                 "SPEAKER_01": self.br_role1.get()}
+        focus = [k for k, v in self.br_focus.items() if v.get()]
+        return sa_brief.build(
+            self._preset_key(), roles, self.br_subject.get(), focus,
+            self.br_extra.get("1.0", "end"), metrics_text,
+            transcript.read_text(encoding="utf-8"))
+
+    def preview_brief(self):
+        """Показывает, что именно уйдёт в модель. Бесплатно."""
+        path = filedialog.askopenfilename(title="Расшифровка для брифа",
+                                          filetypes=[("Расшифровка", "*.txt"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            system, prompt = self._gather_brief(Path(path))
+        except Exception as e:
+            messagebox.showerror("Не удалось собрать бриф", str(e), parent=self.root)
+            return
+        ok, why = sa_llm.available()
+        head = (f"Оценка стоимости: {sa_llm.estimate_cost(system, prompt)}\n"
+                + ("" if ok else f"Разбор недоступен: {why}\n") + "\n")
+        self._show_text(f"Бриф — {Path(path).name}", head + system + "\n\n" + prompt)
+
+    def run_brief(self):
+        ok, why = sa_llm.available()
+        if not ok:
+            messagebox.showerror("Разбор недоступен", why, parent=self.root)
+            return
+        path = filedialog.askopenfilename(title="Расшифровка для разбора",
+                                          filetypes=[("Расшифровка", "*.txt"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            system, prompt = self._gather_brief(Path(path))
+        except Exception as e:
+            messagebox.showerror("Не удалось собрать бриф", str(e), parent=self.root)
+            return
+
+        if not messagebox.askokcancel(
+                "Отправить в модель?",
+                f"Будет израсходовано {sa_llm.estimate_cost(system, prompt)}.\n"
+                "Расшифровка уйдёт в Anthropic API.", parent=self.root):
+            return
+
+        self.an_status.config(text="Модель читает разговор — это займёт минуту-другую…")
+        self.root.update_idletasks()
+        try:
+            text = sa_llm.analyze(system, prompt)
+        except Exception as e:
+            self.an_status.config(text="Разбор не получился")
+            messagebox.showerror("Ошибка разбора", str(e), parent=self.root)
+            return
+        out = sa_llm.save(text, Path(path))
+        self.an_status.config(text=f"Разбор: {out.name}")
+        self._show_text(f"Разбор — {Path(path).name}", text)
+
+    def _show_text(self, title: str, text: str):
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("760x620")
+        area = tk.Text(win, font=("SF Pro Text", 12), wrap="word", padx=10, pady=10)
+        area.pack(fill="both", expand=True, padx=10, pady=10)
+        area.insert("1.0", text)
+        area.config(state="disabled")
 
     def _choose_analysis_audio(self):
         path = filedialog.askopenfilename(
