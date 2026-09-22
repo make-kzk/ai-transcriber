@@ -7,8 +7,11 @@ Deepgram одинаково ломались на английских терм�
 вместо «CFO», «Семео» вместо «CMO»). Здесь можно назвать эти термины
 заранее, до распознавания.
 
-Список по умолчанию собран из тех мест, где системы ошибались на реальной
-записи, и дополняется через --vocabulary.
+Есть ограничение самой службы: подсказка словаря и пословные таймкоды
+взаимоисключающи. По умолчанию берутся таймкоды — они нужны для сверки с
+другими системами и для разбора речи. Флаг --with-vocabulary переключает
+на словарь: текст получается точнее в терминах, но сравнить его будет не с
+чем.
 """
 import argparse
 import os
@@ -44,8 +47,14 @@ def _seconds(value) -> float | None:
         return None
 
 
-def recognize(audio: Path, language: str, vocabulary: list, model: str,
+def recognize(audio: Path, language: str, vocabulary: list | None, model: str,
               on_progress=None):
+    """vocabulary задан — служба отдаёт только текст, без таймкодов.
+
+    Ограничение самой службы: «custom_vocabulary is incompatible with
+    timestamps». Приходится выбирать — подсказка словаря или пословная
+    разметка, обе сразу невозможны.
+    """
     from google import genai
     from google.genai import types
 
@@ -67,26 +76,25 @@ def recognize(audio: Path, language: str, vocabulary: list, model: str,
     if uploaded.state != types.FileState.ACTIVE:
         sys.exit(f"Запись не принята сервисом: состояние {uploaded.state}")
 
-    say(f"   Распознаю, словарь-подсказка: {len(vocabulary)} терминов")
-    interaction = client.interactions.create(
+    config = {"language_codes": [language]}
+    if vocabulary:
+        say(f"   Словарь-подсказка: {len(vocabulary)} терминов "
+            f"(таймкоды при этом недоступны)")
+        config["custom_vocabulary"] = vocabulary
+        config["mode"] = {"type": "verbatim", "diarization_mode": "speaker"}
+    else:
+        say("   Пословные таймкоды и диаризация")
+        # Пословные метки и диаризация требуют verbatim:
+        # в режиме smart они недоступны.
+        config["mode"] = {"type": "verbatim", "diarization_mode": "speaker",
+                          "timestamp_granularities": ["word"]}
+
+    return client.interactions.create(
         model=model,
         input=[{"type": "audio", "uri": uploaded.uri,
                 "mime_type": uploaded.mime_type}],
-        generation_config={
-            "transcription_config": {
-                "language_codes": [language],
-                "custom_vocabulary": vocabulary,
-                # Пословные метки и диаризация требуют verbatim:
-                # в режиме smart они недоступны.
-                "mode": {
-                    "type": "verbatim",
-                    "diarization_mode": "speaker",
-                    "timestamp_granularities": ["word"],
-                },
-            }
-        },
+        generation_config={"transcription_config": config},
     )
-    return interaction
 
 
 def extract_words(interaction):
@@ -115,8 +123,12 @@ def main():
                     help="расшифровка WhisperX — под её разбивку подогнать текст")
     ap.add_argument("--language", default="ru-RU")
     ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--with-vocabulary", action="store_true",
+                    help="подсказать термины (служба тогда не отдаёт таймкоды, "
+                         "результат нельзя сверить и разобрать)")
     ap.add_argument("--vocabulary", type=Path,
-                    help="файл со словарём-подсказкой, по слову или обороту в строке")
+                    help="файл со своими терминами, по одному в строке; "
+                         "включает --with-vocabulary")
     ap.add_argument("--compare", action="store_true")
     args = ap.parse_args()
 
@@ -127,16 +139,34 @@ def main():
     if not args.audio.exists():
         sys.exit(f"Файл не найден: {args.audio}")
 
-    vocabulary = list(DEFAULT_VOCABULARY)
-    if args.vocabulary and args.vocabulary.exists():
-        vocabulary += [l.strip() for l in
-                       args.vocabulary.read_text(encoding="utf-8").splitlines() if l.strip()]
-    vocabulary = list(dict.fromkeys(vocabulary))[:1000]   # предел сервиса
+    vocabulary = None
+    if args.with_vocabulary or args.vocabulary:
+        vocabulary = list(DEFAULT_VOCABULARY)
+        if args.vocabulary and args.vocabulary.exists():
+            vocabulary += [l.strip() for l in
+                           args.vocabulary.read_text(encoding="utf-8").splitlines()
+                           if l.strip()]
+        vocabulary = list(dict.fromkeys(vocabulary))[:1000]   # предел службы
+        if args.reference:
+            print("Со словарём таймкодов не будет, подогнать под эталон нечем — "
+                  "эталон не используется.", file=sys.stderr)
+            args.reference, args.compare = None, False
 
     interaction = recognize(args.audio, args.language, vocabulary, args.model)
     words = extract_words(interaction)
+
     if not words:
-        sys.exit("Gemini не вернул пословной разметки — проверьте, что режим verbatim принят.")
+        # Со словарём служба отдаёт только текст — сохраняем его как есть.
+        text = (getattr(interaction, "output_text", "") or "").strip()
+        if not text:
+            sys.exit("Gemini не вернул ни разметки, ни текста.")
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+        out = args.audio.with_name(f"{args.audio.stem}_gemini-словарь_{stamp}.txt")
+        out.write_text(text, encoding="utf-8")
+        print(f"✅ Текст получен, {len(text.split())} слов")
+        print(f"📄 Расшифровка Gemini со словарём: {out.name}")
+        print("   Без таймкодов: сверка и разбор речи по этому файлу недоступны.")
+        return
 
     speaker_of = tu.SpeakerMap()
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")

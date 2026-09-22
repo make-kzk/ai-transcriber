@@ -85,6 +85,19 @@ def save_words(words, transcript_path: Path) -> Path:
     return out
 
 
+def load_words(path: Path):
+    """Читает выгрузку пословных таймкодов."""
+    out = []
+    for w in json.loads(Path(path).read_text(encoding="utf-8")):
+        if w.get("start") is None:
+            continue
+        # В ранних выгрузках поле называлось word — принимаем оба варианта.
+        out.append({"text": w.get("text") or w.get("word") or "",
+                    "start": w["start"], "end": w.get("end") or w["start"],
+                    "speaker": w.get("speaker")})
+    return out
+
+
 def parse_transcript(path: Path):
     """Реплики с временем, говорящим и текстом — для разбора, а не для сверки."""
     segs, cur = [], None
