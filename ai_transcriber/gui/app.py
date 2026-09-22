@@ -733,17 +733,24 @@ class TranscribeApp:
         return launcher
 
     def _latest_result(self):
-        """Самый свежий результат для выбранного аудио.
-
-        Имя содержит дату и время прогона, поэтому вычислить его заранее
-        нельзя — ищем по маске и берём последний по времени изменения.
-        """
+        """Самый свежий результат для выбранного аудио (Whisper, Gemini, ElevenLabs, сверка)."""
         if not self.selected_file:
             return None
         folder = self.selected_file.parent
-        pattern = f"{self.selected_file.stem}_транскрибация*.txt"
-        found = sorted(folder.glob(pattern), key=lambda f: f.stat().st_mtime)
-        return found[-1] if found else None
+        stem = self.selected_file.stem
+        candidates = []
+        for pattern in (
+            f"{stem}_транскрибация*.txt",
+            f"{stem}_gemini*.txt",
+            f"{stem}_elevenlabs*.txt",
+            f"{stem}*_свод*.txt",
+            f"{stem}*_сверка*.txt",
+        ):
+            candidates.extend(folder.glob(pattern))
+        txt_candidates = [f for f in candidates if f.suffix == ".txt"]
+        if not txt_candidates:
+            return None
+        return sorted(txt_candidates, key=lambda f: f.stat().st_mtime)[-1]
 
     def open_result_file(self):
         result = self._latest_result()

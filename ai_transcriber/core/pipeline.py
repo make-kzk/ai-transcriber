@@ -177,11 +177,38 @@ def run_pipeline(
         label = PIPELINE_ENGINES[key]["label"]
         code = codes.get(label, 1)
         if code == 0:
+            if dry_run:
+                produced[key] = target_files[key]["txt"]
+                words_map[key] = target_files[key]["words"]
+                continue
+
             txt_path = target_files[key]["txt"]
             words_path = target_files[key]["words"]
-            if dry_run or txt_path.exists():
+
+            # Если файл с точным stamp не найден (например, адаптер пишет %Y-%m-%d_%H%M),
+            # ищем самый свежий созданный файл по маске
+            if not txt_path.exists():
+                cfg = PIPELINE_ENGINES[key]
+                if cfg["kind"] == "whisper":
+                    pattern = f"{stem}_транскрибация_{cfg['model']}_*.txt"
+                else:
+                    pattern = f"{stem}_{key}_*.txt"
+                matches = [
+                    f for f in out_dir.glob(pattern)
+                    if not f.name.endswith("_свод.txt") and "_свод_" not in f.name and not f.name.endswith("_слова.json")
+                ]
+                if matches:
+                    txt_path = sorted(matches, key=lambda f: f.stat().st_mtime)[-1]
+
+            if txt_path.exists():
                 produced[key] = txt_path
-                words_map[key] = words_path
+                possible_words = txt_path.with_name(txt_path.stem + "_слова.json")
+                if possible_words.exists():
+                    words_map[key] = possible_words
+                elif words_path.exists():
+                    words_map[key] = words_path
+                else:
+                    words_map[key] = None
             else:
                 failed.append(label)
         else:
