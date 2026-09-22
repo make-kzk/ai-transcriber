@@ -33,6 +33,7 @@ DEFAULTS = {
         "questions": True,
         "transitions": True,  # паузы и перебивания между репликами
         "inner": True,        # паузы и запинки внутри реплики
+        "acoustics": True,    # тон, громкость, темп артикуляции
     },
 }
 

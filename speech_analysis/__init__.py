@@ -10,13 +10,14 @@
 """
 from pathlib import Path
 
-from . import config, metrics, report
+from . import acoustics, config, metrics, report
 
-__all__ = ["analyze", "config", "metrics", "report"]
+__all__ = ["analyze", "acoustics", "config", "metrics", "report"]
 
 
 def analyze(transcript: Path, words: Path | None = None,
-            names: list[str] | None = None, cfg: dict | None = None):
+            names: list[str] | None = None, cfg: dict | None = None,
+            audio: Path | None = None):
     """Считает метрики и возвращает (данные, готовый текст отчёта)."""
     transcript = Path(transcript)
     cfg = cfg or config.load()
@@ -40,7 +41,29 @@ def analyze(transcript: Path, words: Path | None = None,
         "people": metrics.per_speaker(segments, name_map, cfg),
         "pauses": pauses,
         "overlaps": overlaps,
-        "inner": metrics.inside_turns(metrics.parse_words(words), name_map, cfg)
-                 if words else None,
+        "inner": None,
+        "acoustics": None,
+        "acoustics_note": None,
     }
+
+    word_list = metrics.parse_words(words) if words else None
+    if word_list:
+        data["inner"] = metrics.inside_turns(word_list, name_map, cfg)
+
+    # Акустика требует и звука, и пословных таймкодов: без них неизвестно,
+    # какой отрезок записи кому принадлежит.
+    if audio and cfg["show"].get("acoustics", True):
+        ok, why = acoustics.available()
+        if not ok:
+            data["acoustics_note"] = why
+        elif not word_list:
+            data["acoustics_note"] = ("нет пословных таймкодов — непонятно, "
+                                      "какой участок записи чей")
+        else:
+            try:
+                data["acoustics"] = acoustics.measure(Path(audio), word_list,
+                                                      name_map, cfg)
+            except Exception as e:
+                data["acoustics_note"] = f"не удалось измерить: {e}"
+
     return data, report.render(data, cfg)

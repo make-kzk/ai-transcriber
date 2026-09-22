@@ -292,6 +292,7 @@ class TranscribeApp:
             ("balance", "баланс времени"), ("rate", "темп речи"),
             ("parasites", "слова-паразиты"), ("questions", "вопросы"),
             ("transitions", "паузы между репликами"), ("inner", "паузы и запинки внутри"),
+            ("acoustics", "акустика: тон, громкость"),
         ]):
             var = tk.BooleanVar(value=cfg["show"].get(key, True))
             self.an_show[key] = var
@@ -311,6 +312,24 @@ class TranscribeApp:
         self.an_parasites.pack(fill="both", expand=True)
         self.an_parasites.insert("1.0", "\n".join(cfg["parasites"]))
 
+        audio_box = ttk.Frame(box, style="Card.TFrame", padding=12)
+        audio_box.pack(fill="x", pady=(0, 10))
+        ttk.Label(audio_box, text="Аудиофайл для акустики:", style="Card.TLabel",
+                  font=("SF Pro Text", 12, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(audio_box, style="Card.TLabel", foreground="#86868B",
+                  font=("SF Pro Text", 10),
+                  text="Нужен для измерения тона и громкости. Без него остальные метрики\n"
+                       "считаются как обычно. Нужны также пословные таймкоды рядом с расшифровкой.").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        self.an_audio = None
+        self.an_audio_lbl = ttk.Label(audio_box, text="не выбран", style="Card.TLabel",
+                                      foreground="#86868B")
+        ttk.Button(audio_box, text="Выбрать...", command=self._choose_analysis_audio).grid(
+            row=2, column=0, sticky="w")
+        self.an_audio_lbl.grid(row=2, column=1, sticky="w", padx=(10, 0))
+        ttk.Button(audio_box, text="Убрать", command=self._clear_analysis_audio).grid(
+            row=2, column=2, sticky="w", padx=(10, 0))
+
         btns = ttk.Frame(box)
         btns.pack(fill="x")
         ttk.Button(btns, text="Сохранить настройки", command=self._save_analysis_config).pack(side="left")
@@ -321,6 +340,19 @@ class TranscribeApp:
         self.an_status = ttk.Label(box, text=f"Настройки: {sa_config.CONFIG_PATH}",
                                    style="SubHeader.TLabel")
         self.an_status.pack(anchor="w", pady=(10, 0))
+
+    def _choose_analysis_audio(self):
+        path = filedialog.askopenfilename(
+            title="Аудиофайл записи",
+            filetypes=[("Аудио и видео", "*.m4a *.mp3 *.wav *.mp4 *.mov *.aac *.ogg *.flac"),
+                       ("Все файлы", "*.*")])
+        if path:
+            self.an_audio = Path(path)
+            self.an_audio_lbl.config(text=self.an_audio.name, foreground="#1D1D1F")
+
+    def _clear_analysis_audio(self):
+        self.an_audio = None
+        self.an_audio_lbl.config(text="не выбран", foreground="#86868B")
 
     def _collect_analysis_config(self):
         cfg = sa_config.load()
@@ -365,7 +397,9 @@ class TranscribeApp:
             return
         try:
             cfg = self._collect_analysis_config()
-            _, text = speech_analysis.analyze(Path(path), cfg=cfg)
+            self.an_status.config(text="Считаю… акустика занимает до полуминуты")
+            self.root.update_idletasks()
+            _, text = speech_analysis.analyze(Path(path), cfg=cfg, audio=self.an_audio)
         except Exception as e:
             messagebox.showerror("Не удалось разобрать", str(e), parent=self.root)
             return

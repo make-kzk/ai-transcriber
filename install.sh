@@ -17,7 +17,9 @@ echo "Настройка Python окружения в $VENV_DIR..."
 if [ ! -d "$VENV_DIR" ]; then
     uv venv --python 3.11 "$VENV_DIR"
 fi
-uv pip install --python "$VENV_DIR/bin/python" modal numpy
+# praat-parselmouth — измерение тона и громкости в модуле анализа речи.
+# Praat, а не самодельная обработка сигнала; один пакет без тяжёлых зависимостей.
+uv pip install --python "$VENV_DIR/bin/python" modal numpy httpx praat-parselmouth
 
 # 3. Симлинки в ~/.local/bin (чтобы изменения в коде сразу работали везде)
 mkdir -p "$HOME/.local/bin"

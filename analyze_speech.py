@@ -12,6 +12,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("transcript", type=Path)
     ap.add_argument("--words", type=Path, help="пословные таймкоды (ищутся рядом)")
+    ap.add_argument("--audio", type=Path, help="аудиофайл — для акустики")
     ap.add_argument("--names", help="имена вместо SPEAKER_00, через запятую")
     ap.add_argument("-o", "--output", type=Path)
     ap.add_argument("--show-config", action="store_true",
@@ -27,7 +28,8 @@ def main():
 
     try:
         _, text = analyze(args.transcript, args.words,
-                          args.names.split(",") if args.names else None)
+                          args.names.split(",") if args.names else None,
+                          audio=args.audio)
     except ValueError as e:
         sys.exit(str(e))
 

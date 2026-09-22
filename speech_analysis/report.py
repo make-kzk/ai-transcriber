@@ -69,6 +69,20 @@ def render(data: dict, cfg: dict) -> str:
                     add("      Запинок не найдено — возможно, система их вычищает.")
         add("")
 
+    if show.get("acoustics", True):
+        add("── Акустика")
+        if data.get("acoustics"):
+            for spk, a in data["acoustics"].items():
+                add(f"   {spk}:")
+                add(f"      Высота голоса: {a['f0_median']:.0f} Гц, "
+                    f"разброс ±{a['f0_spread_st']:.1f} полутона")
+                add(f"      Громкость: {a['db_median']:.0f} дБ, "
+                    f"разброс ±{a['db_spread']:.1f}")
+                add(f"      Темп артикуляции: {a['articulation']:.1f} слога/с")
+        else:
+            add(f"   {data.get('acoustics_note') or 'аудиофайл не указан'}.")
+        add("")
+
     if show["transitions"]:
         add("── Между репликами")
         pauses = data["pauses"]
@@ -87,6 +101,8 @@ def render(data: dict, cfg: dict) -> str:
     add("секунды: темп на коротких репликах не считается. Запинки видны только")
     add("там, где система их сохраняет — Whisper причёсывает речь, ElevenLabs")
     add("и Deepgram оставляют, поэтому сравнивать их счёт между системами")
-    add("бессмысленно.")
+    add("бессмысленно. Разброс тона дан в полутонах, а не в герцах: мужской")
+    add("и женский голос в герцах несравнимы. Слоги считаются по гласным —")
+    add("это приближение, достаточное для темпа, но не для фонетики.")
     add("=" * 62)
     return "\n".join(out)
