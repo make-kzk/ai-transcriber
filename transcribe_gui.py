@@ -382,8 +382,24 @@ class TranscribeApp:
         self.br_extra.grid(row=6, column=1, columnspan=3, sticky="we", padx=(8, 0), pady=(8, 0))
         brief_box.columnconfigure(3, weight=1)
 
+        model_row = ttk.Frame(brief_box, style="Card.TFrame")
+        model_row.grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        self.br_audio = tk.BooleanVar(value=True)
+        ttk.Checkbutton(model_row, text="Отправить вместе с записью",
+                        variable=self.br_audio, style="Card.TCheckbutton").pack(side="left")
+        ttk.Label(model_row, text="   Модель:", style="Card.TLabel").pack(side="left")
+        self.br_model = tk.StringVar(value=sa_llm.MODELS[sa_llm.DEFAULT_MODEL])
+        ttk.Combobox(model_row, textvariable=self.br_model, state="readonly", width=44,
+                     values=list(sa_llm.MODELS.values())).pack(side="left", padx=(6, 0))
+
+        ttk.Label(brief_box, style="Card.TLabel", foreground="#86868B",
+                  font=("SF Pro Text", 10),
+                  text="С записью модель слышит интонацию, паузы и перебивания сама —\n"
+                       "аудио тарифицируется как 32 токена в секунду, это недорого.").grid(
+            row=8, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
         brief_btns = ttk.Frame(brief_box, style="Card.TFrame")
-        brief_btns.grid(row=7, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        brief_btns.grid(row=9, column=0, columnspan=4, sticky="w", pady=(10, 0))
         ttk.Button(brief_btns, text="Показать бриф", command=self.preview_brief).pack(side="left")
         ttk.Button(brief_btns, text="🧠 Разобрать по брифу...",
                    command=self.run_brief).pack(side="left", padx=8)
@@ -400,6 +416,16 @@ class TranscribeApp:
         self.an_status = ttk.Label(box, text=f"Настройки: {sa_config.CONFIG_PATH}",
                                    style="SubHeader.TLabel")
         self.an_status.pack(anchor="w", pady=(10, 0))
+
+    def _model_key(self):
+        for key, label in sa_llm.MODELS.items():
+            if label == self.br_model.get():
+                return key
+        return sa_llm.DEFAULT_MODEL
+
+    def _brief_audio(self):
+        """Запись уходит в модель, только если она выбрана и галочка стоит."""
+        return self.an_audio if (self.br_audio.get() and self.an_audio) else None
 
     def _preset_key(self):
         for key, p in sa_brief.PRESETS.items():
@@ -442,7 +468,11 @@ class TranscribeApp:
             messagebox.showerror("Не удалось собрать бриф", str(e), parent=self.root)
             return
         ok, why = sa_llm.available()
-        head = (f"Оценка стоимости: {sa_llm.estimate_cost(system, prompt)}\n"
+        audio = self._brief_audio()
+        cost = sa_llm.estimate_cost(system, prompt, audio, self._model_key())
+        head = (f"Оценка стоимости: {cost}\n"
+                + (f"Вместе с записью: {audio.name}\n" if audio
+                   else "Без записи — только текст.\n")
                 + ("" if ok else f"Разбор недоступен: {why}\n") + "\n")
         self._show_text(f"Бриф — {Path(path).name}", head + system + "\n\n" + prompt)
 
@@ -461,16 +491,22 @@ class TranscribeApp:
             messagebox.showerror("Не удалось собрать бриф", str(e), parent=self.root)
             return
 
+        audio = self._brief_audio()
+        model = self._model_key()
+        what = "Расшифровка и запись уйдут" if audio else "Расшифровка уйдёт"
         if not messagebox.askokcancel(
                 "Отправить в модель?",
-                f"Будет израсходовано {sa_llm.estimate_cost(system, prompt)}.\n"
-                "Расшифровка уйдёт в Anthropic API.", parent=self.root):
+                f"Будет израсходовано {sa_llm.estimate_cost(system, prompt, audio, model)}.\n"
+                f"{what} в Google AI Studio.", parent=self.root):
             return
 
-        self.an_status.config(text="Модель читает разговор — это займёт минуту-другую…")
-        self.root.update_idletasks()
+        def progress(text):
+            self.an_status.config(text=text)
+            self.root.update_idletasks()
+
+        progress("Отправляю…")
         try:
-            text = sa_llm.analyze(system, prompt)
+            text = sa_llm.analyze(system, prompt, audio, model, on_progress=progress)
         except Exception as e:
             self.an_status.config(text="Разбор не получился")
             messagebox.showerror("Ошибка разбора", str(e), parent=self.root)
