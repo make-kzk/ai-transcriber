@@ -29,11 +29,15 @@ uv pip install --python "$VENV_DIR/bin/python" \
     praat-parselmouth==0.4.7 \
     google-genai==2.24.0
 
+# Установка ai-transcriber в editable-режиме
+uv pip install --python "$VENV_DIR/bin/python" -e "$SCRIPT_DIR"
+
 # 3. Симлинки в ~/.local/bin (чтобы изменения в коде сразу работали везде)
 mkdir -p "$HOME/.local/bin"
 ln -sf "$SCRIPT_DIR/transcribe_modal.py" "$HOME/.local/bin/transcribe_modal.py"
 ln -sf "$SCRIPT_DIR/transcribe_gui.py" "$HOME/.local/bin/transcribe_gui.py"
 ln -sf "$SCRIPT_DIR/transcribe" "$HOME/.local/bin/transcribe"
+ln -sf "$VENV_DIR/bin/ai-transcriber" "$HOME/.local/bin/ai-transcriber"
 chmod +x "$SCRIPT_DIR/transcribe"
 ln -sf "$VENV_DIR/bin/modal" "$HOME/.local/bin/modal"
 
@@ -113,9 +117,9 @@ fi
 echo "Цифровая подпись бандла macOS (codesign)..."
 codesign --force --deep --sign - "$APP_DIR" 2>/dev/null || true
 
-# Копия на Рабочий стол
-rm -rf "$HOME/Desktop/AI Transcriber.app"
-cp -R "$APP_DIR" "$HOME/Desktop/AI Transcriber.app"
+# Копия на Рабочий стол (если разрешено правами TCC)
+rm -rf "$HOME/Desktop/AI Transcriber.app" 2>/dev/null || true
+cp -R "$APP_DIR" "$HOME/Desktop/AI Transcriber.app" 2>/dev/null || true
 codesign --force --deep --sign - "$HOME/Desktop/AI Transcriber.app" 2>/dev/null || true
 
 echo "✅ Установка и настройка успешно завершены!"

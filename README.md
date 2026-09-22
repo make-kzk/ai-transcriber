@@ -76,19 +76,17 @@ cd ~/ai-transcriber && ./install.sh
 ### Командная строка
 
 ```bash
-# Один Whisper, быстро
+# Единая консольная утилита ai-transcriber:
+ai-transcriber pipeline запись.m4a --systems whisper-v3 elevenlabs --stagger 2.0
+ai-transcriber transcribe запись.m4a --engine whisper-v3 --speakers 2
+ai-transcriber compare основа.txt сверка.txt
+ai-transcriber analyze расшифровка.txt --audio запись.m4a --names "Имя,Имя"
+
+# Или через классические команды (100% обратная совместимость):
 transcribe запись.m4a --speakers 2
-
-# Несколько систем со сверкой
-python run_pipeline.py запись.m4a --systems gemini whisper-v3 --speakers 2
-
-# Посмотреть план без запуска и без расходов
-python run_pipeline.py запись.m4a --systems gemini whisper-v3 --dry-run
-
-# Сверить две готовых расшифровки
+python run_pipeline.py запись.m4a --systems whisper-v3 elevenlabs gemini --stagger 2.0
+python run_pipeline.py запись.m4a --systems whisper-v3 elevenlabs --dry-run
 python compare_transcripts.py основа.txt сверка.txt
-
-# Метрики речи, с акустикой
 python analyze_speech.py расшифровка.txt --audio запись.m4a --names "Имя,Имя"
 ```
 
@@ -99,15 +97,15 @@ python analyze_speech.py расшифровка.txt --audio запись.m4a --n
 Проверены на реальном деловом созвоне: 35 минут русской речи, плотно
 насыщенной английскими терминами.
 
-| Система | Цена за час | Диаризация | Особенность |
-|---|---|---|---|
-| Whisper large-v3 | $0.058 | pyannote | в пределах бесплатных $30 Modal |
-| Whisper large-v3-turbo | $0.058 | pyannote | быстрее, точность ниже |
-| Whisper large-v2 | $0.058 | pyannote | прежняя версия |
-| Gemini 3.5 Transcribe | см. Spend | своя | подсказка словаря до 1000 фраз |
-| ElevenLabs Scribe | $0.22 | своя | лучший результат в проверке |
-| Nexara | 360 ₽/1000 мин | своя | российский сервис |
-| Deepgram Nova-3 | $0.31 | своя | режим multi, $200 при старте |
+| Система | Статус | Цена за час | Диаризация | Особенность |
+|---|---|---|---|---|
+| Whisper large-v3 | **Активен** | $0.058 | pyannote | в пределах бесплатных $30 Modal; база диаризации |
+| Whisper large-v3-turbo | **Активен** | $0.058 | pyannote | быстрее, точность ниже |
+| Whisper large-v2 | **Активен** | $0.058 | pyannote | прежняя проверенная версия |
+| ElevenLabs Scribe | **Активен** | $0.22 | своя | лучший результат: ловит отрицания и C-level |
+| Gemini 3.5 Transcribe | **Активен** | см. Spend | своя | подсказка словаря до 1000 фраз |
+| Nexara | **Deprecated** | 360 ₽/1000 мин | своя | неэффективен (см. [deprecated/README.md](deprecated/README.md)) |
+| Deepgram Nova-3 | **Deprecated** | $0.31 | своя | неэффективен (см. [deprecated/README.md](deprecated/README.md)) |
 
 ### Что показала проверка
 
@@ -115,7 +113,7 @@ python analyze_speech.py расшифровка.txt --audio запись.m4a --n
 верно распознал аббревиатуры C-уровня и единственный не потерял отрицание
 в ключевой фразе:
 
-| Фрагмент | Whisper v3 | Nexara | Deepgram | ElevenLabs |
+| Фрагмент | Whisper v3 | Nexara (депрекейт) | Deepgram (депрекейт) | ElevenLabs |
 |---|---|---|---|---|
 | финансовый директор | «СПО» | «СИПО» | «CFIO» | **«CFO»** |
 | кейс с C-level | «Семео» | «Симео» | «Симео» | **«CMO»** |
@@ -124,18 +122,18 @@ python analyze_speech.py расшифровка.txt --audio запись.m4a --n
 Последняя строка — причина, по которой в проекте появилась сверка. Смысл
 переворачивается, а текст выглядит безупречно.
 
-**Ошибки систем коррелируют.** Расхождение по словам между парами:
+**Почему исключены Nexara и Deepgram:**
+Расхождение по словам между парами показало высокую корреляцию ошибок:
 
 ```
-Whisper ↔ Nexara      12,5%     ← ближе всего
+Whisper ↔ Nexara      12,5%     ← максимальная близость ошибок
 Whisper ↔ Deepgram    13,4%
 Nexara  ↔ Deepgram    15,3%
-Whisper ↔ ElevenLabs  16,6%     ← дальше всего
+Whisper ↔ ElevenLabs  16,6%     ← независимая родословная, выявляет слепые зоны
 ```
 
-Whisper, Nexara и Deepgram ошибаются похоже — и там, где они ошибаются
-вместе, сверка между ними слепа. Поэтому сверять стоит с системой другой
-родословной.
+Whisper, Nexara и Deepgram ошибаются одинаково, поэтому сверка между ними
+слепа. Nexara и Deepgram вынесены в директорию `deprecated/` с сохранением замеров.
 
 ---
 
@@ -222,32 +220,37 @@ Whisper, Nexara и Deepgram ошибаются похоже — и там, гд�
 
 ## Структура
 
-```
-transcribe_modal.py       Whisper на видеокарте Modal
-transcribe_gemini.py      Gemini 3.5 Transcribe
-transcribe_elevenlabs.py  ElevenLabs Scribe
-transcribe_nexara.py      Nexara
-transcribe_deepgram.py    Deepgram Nova-3
-transcript_utils.py       общее для адаптеров: формат, раскладка, сверка
+```text
+pyproject.toml            стандартная конфигурация пакета Python
+AUDIT_REPORT.md           полный отчет об архитектурном аудите
 
-run_pipeline.py           цепочка: несколько систем и сведение
-compare_transcripts.py    сведение двух расшифровок с пометками
-analyze_speech.py         обёртка для командной строки
+ai_transcriber/           единый модульный пакет:
+  cli.py                  консольная команда `ai-transcriber`
+  core/
+    models.py             типизированные структуры данных
+    utils.py              раскладка по репликам, таймкоды, нормализация
+    compare.py            алгоритм 3-уровневой сверки
+    pipeline.py           гибкий параллельный оркестратор с задержкой
+  engines/
+    base.py               базовый интерфейс адаптера
+    modal_whisper.py      запуск Whisper (v3, turbo, v2) на Modal GPU
+    elevenlabs.py         адаптер ElevenLabs Scribe
+    gemini.py             адаптер Google Gemini 3.5 Transcribe
+  speech_analysis/        объективный анализ речи, Praat акустика и LLM-бриф
+  gui/                    приложение на Tkinter (app.py)
 
-speech_analysis/          самостоятельный модуль разбора речи
-  config.py               настройки
-  metrics.py              вычисления
-  acoustics.py            тон, громкость, темп артикуляции
-  brief.py                сборка брифа — читается и правится глазами
-  llm.py                  отправка в Gemini — единственное, что тратит деньги
-  report.py               форматирование
+deprecated/               архив неэффективных движков:
+  README.md               обоснование и цифры замеров
+  transcribe_nexara.py    @deprecated Nexara
+  transcribe_deepgram.py  @deprecated Deepgram Nova-3
 
-transcribe_gui.py         приложение
-transcribe                команда для терминала
-install.sh                установка и сборка .app
+tests/                    набор unit-тестов (35 тестов):
+  test_rules.py           тесты на правила классификации расхождений
+  test_adapters.py        mock-тесты парсинга ответов ElevenLabs и Gemini
+  test_pipeline.py        тесты оркестратора, dry-run и приведения к эталону
 
-measurements/             скрипты, которыми получены цифры из README
-tests/                    тесты на правила разметки и разбора
+[Корневые фасады для 100% обратной совместимости с .app и шеллом]
+run_pipeline.py, transcribe_gui.py, transcribe, compare_transcripts.py, analyze_speech.py
 ```
 
 ---
@@ -258,12 +261,14 @@ tests/                    тесты на правила разметки и р�
 записи; правила разметки расхождений; акустика (206 Гц у женского голоса,
 115 Гц у мужского — измеряется именно то, что нужно).
 
+**Покрыто тестами (35 unit-тестов):**
+- Правила классификации расхождений и фильтрация паразитов (`test_rules.py`).
+- Разбор ответов и извлечение пословных таймкодов ElevenLabs и Gemini без платных API-запросов (`test_adapters.py`).
+- Оркестрация параллельного пайплайна и подгонка слов под эталонную сетку (`test_pipeline.py`).
+
 **Опровергнуто проверкой:** оценки достоверности выравнивания wav2vec2 не
 годятся как детектор ошибок — они меряют длину слова, а не правильность
 (1–2 буквы дают 0,72, семь-девять букв 0,87), и слепы к пропущенным
 словам: оценивать нечего, если слова нет. Точность около 6%.
 
-**Не проверено:** качество Turbo на русском; распознавание через Gemini и
-разбор по брифу на реальном материале; разбор ответов внешних сервисов —
-тесты покрывают правила разметки, но не адаптеры, потому что сохранённых
-ответов API под рукой нет.
+**Не проверено:** качество Turbo на русском; разбор по брифу на реальном закрытом материале.
