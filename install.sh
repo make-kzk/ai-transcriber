@@ -20,7 +20,14 @@ fi
 # praat-parselmouth — измерение тона и громкости в модуле анализа речи.
 # Praat, а не самодельная обработка сигнала; один пакет без тяжёлых зависимостей.
 # google-genai — разбор по брифу на вкладке анализа (нужен ключ Google AI Studio).
-uv pip install --python "$VENV_DIR/bin/python" modal numpy httpx praat-parselmouth google-genai
+# Версии зафиксированы: облачный образ мы пиним до последней цифры, и
+# оставлять локальную сторону плавающей — та же ловушка, только позже.
+uv pip install --python "$VENV_DIR/bin/python" \
+    modal==1.5.5 \
+    numpy==2.4.6 \
+    httpx==0.28.1 \
+    praat-parselmouth==0.4.7 \
+    google-genai==2.24.0
 
 # 3. Симлинки в ~/.local/bin (чтобы изменения в коде сразу работали везде)
 mkdir -p "$HOME/.local/bin"
