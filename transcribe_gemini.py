@@ -15,6 +15,8 @@ Deepgram одинаково ломались на английских терм�
 """
 import argparse
 import os
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -24,6 +26,15 @@ import transcript_utils as tu
 
 MODEL = "gemini-3.5-transcribe"
 
+# Жёсткий предел interactions.create() в режиме verbatim (не батч): сервис
+# считает аудио 32 токена в секунду и отклоняет запрос при input > 98304
+# токенов — сообщение "The input token count exceeds the maximum number of
+# tokens allowed 98304". Это целиком аудио-бюджет, без текстового промпта.
+# 98304 / 32 = 3072 с = 51.2 мин; оставляем запас на служебные токены.
+MAX_INPUT_TOKENS = 98304
+TOKENS_PER_AUDIO_SEC = 32
+SAFE_AUDIO_SECONDS = MAX_INPUT_TOKENS / TOKENS_PER_AUDIO_SEC - 60  # запас ~1 мин
+
 # Термины, на которых спотыкались все проверенные системы.
 DEFAULT_VOCABULARY = [
     "CEO", "CFO", "CMO", "CPO", "CTO", "COO", "C-level",
@@ -32,6 +43,21 @@ DEFAULT_VOCABULARY = [
     "backend", "frontend", "R&D", "LinkedIn", "onboarding",
     "welcome-встреча", "релокация", "испытательный срок",
 ]
+
+
+def audio_duration_seconds(path: Path) -> float | None:
+    """Длительность файла в секундах — нужна для проверки лимита до отправки."""
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", str(path)],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        return float(out.strip())
+    except (subprocess.CalledProcessError, ValueError):
+        return None
 
 
 def _seconds(value) -> float | None:
@@ -152,7 +178,37 @@ def main():
                   "эталон не используется.", file=sys.stderr)
             args.reference, args.compare = None, False
 
-    interaction = recognize(args.audio, args.language, vocabulary, args.model)
+    duration = audio_duration_seconds(args.audio)
+    if duration and duration > SAFE_AUDIO_SECONDS:
+        limit_min = SAFE_AUDIO_SECONDS / 60
+        sys.exit(
+            f"Запись длится {duration/60:.0f} мин — это больше предела Gemini "
+            f"3.5 Transcribe (interactions.create в режиме verbatim берёт не "
+            f"более ~{limit_min:.0f} мин аудио за один запрос: {MAX_INPUT_TOKENS} "
+            f"входных токенов, аудио стоит {TOKENS_PER_AUDIO_SEC} токена/с). "
+            f"Сервис отклонит запрос ошибкой 'input token count exceeds the "
+            f"maximum'.\n"
+            f"Разбейте запись на части короче {limit_min:.0f} мин (например, "
+            f"ffmpeg -i запись.m4a -f segment -segment_time {int(SAFE_AUDIO_SECONDS)} "
+            f"-c copy часть_%02d.m4a) или используйте другую систему "
+            f"распознавания для длинных записей."
+        )
+
+    try:
+        interaction = recognize(args.audio, args.language, vocabulary, args.model)
+    except Exception as e:
+        # SDK кидает сырой BadRequestError с телом ответа службы внутри —
+        # без этого пользователь видит только длинный traceback без сути.
+        message = str(e)
+        if "exceeds the maximum number of tokens" in message:
+            sys.exit(
+                f"Gemini отклонил запись — превышен лимит токенов на вход.\n"
+                f"{message}\n"
+                f"Длительность записи: {f'{duration/60:.0f} мин' if duration else 'неизвестна (нет ffprobe)'}.\n"
+                f"Разбейте запись на части короче ~{SAFE_AUDIO_SECONDS/60:.0f} мин."
+            )
+        sys.exit(f"Ошибка запроса к Gemini: {message}")
+
     words = extract_words(interaction)
 
     if not words:
